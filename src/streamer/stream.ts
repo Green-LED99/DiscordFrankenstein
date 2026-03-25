@@ -14,9 +14,14 @@ interface ActiveStream {
   guildId: string;
   channelId: string;
   abortController: AbortController;
+  startedAt: number;
+  copyMode: boolean;
+  streamUrl: string;
 }
 
 let activeStream: ActiveStream | null = null;
+// Prevent infinite retry loops
+let retryingTranscode = false;
 
 export function isStreaming(): boolean {
   return activeStream !== null;
@@ -29,7 +34,8 @@ export function getActiveStreamGuild(): string | null {
 export async function startVideoStream(
   guildId: string,
   channelId: string,
-  streamUrl: string
+  streamUrl: string,
+  forceCopyMode?: boolean
 ): Promise<void> {
   // Stop any existing stream first
   if (activeStream) {
@@ -47,9 +53,13 @@ export async function startVideoStream(
   const tuned = await autoTune();
 
   // 3. Determine copy vs transcode
-  const maxWidth = config.maxResolution === 720 ? 1280 : 854;
+  const resolutionMap: Record<number, number> = { 1080: 1920, 720: 1280, 480: 854 };
+  const maxWidth = resolutionMap[config.maxResolution] ?? 1280;
   const maxHeight = config.maxResolution;
-  const copyMode = isCopyModeEligible(sourceInfo, maxWidth, maxHeight, config.maxFps);
+  const copyMode =
+    forceCopyMode === undefined
+      ? isCopyModeEligible(sourceInfo, maxWidth, maxHeight, config.maxFps)
+      : forceCopyMode;
 
   // 4. Build stream options
   const options = buildStreamOptions(sourceInfo, tuned, copyMode);
@@ -72,6 +82,9 @@ export async function startVideoStream(
     guildId,
     channelId,
     abortController,
+    startedAt: Date.now(),
+    copyMode,
+    streamUrl,
   };
 
   // 7. Monitor A/V sync via FFmpeg stderr
@@ -89,18 +102,56 @@ export async function startVideoStream(
     type: "go-live",
   }, abortController.signal);
 
+  // Capture values NOW before the async gap — activeStream may be nulled
+  // by stopVideoStream() before the Promise.allSettled callback fires.
+  const streamStartedAt = Date.now();
+  const streamWasCopyMode = copyMode;
+  const streamGuildId = guildId;
+  const streamChannelId = channelId;
+
   // Handle stream end
-  Promise.allSettled([promise, playPromise]).then(([encodeResult, playResult]) => {
-    if (encodeResult.status === "rejected" && !abortController.signal.aborted) {
+  Promise.allSettled([promise, playPromise]).then(async ([encodeResult, playResult]) => {
+    if (abortController.signal.aborted) return;
+
+    const elapsed = Date.now() - streamStartedAt;
+    const wasCopyMode = streamWasCopyMode;
+    const url = streamUrl;
+    const guild = streamGuildId;
+    const channel = streamChannelId;
+
+    const encFailed = encodeResult.status === "rejected";
+    const playFailed = playResult.status === "rejected";
+
+    if (encFailed) {
       log.error(`FFmpeg error: ${encodeResult.reason}`);
     }
-    if (playResult.status === "rejected" && !abortController.signal.aborted) {
+    if (playFailed) {
       log.error(`Playback error: ${playResult.reason}`);
     }
-    if (!abortController.signal.aborted) {
-      log.info("Stream ended naturally");
+
+    // If copy mode failed (at any point), retry with transcoding.
+    // The NUT muxer's h264_metadata BSF is incompatible with many Torrentio
+    // streams, causing "Invalid NAL unit size" errors even minutes in.
+    if ((encFailed || playFailed) && wasCopyMode && !retryingTranscode) {
+      log.warn(
+        `Copy mode failed after ${elapsed}ms — retrying with transcoding`
+      );
       cleanup();
+
+      retryingTranscode = true;
+      try {
+        await startVideoStream(guild, channel, url, false);
+      } catch (err) {
+        log.error(`Transcode retry also failed: ${err}`);
+        cleanup();
+      } finally {
+        retryingTranscode = false;
+      }
+      return;
     }
+
+    log.info("Stream ended naturally");
+    cleanup();
   });
 
   log.info("Stream started successfully");
@@ -108,6 +159,20 @@ export async function startVideoStream(
 
 function cleanup(): void {
   stopSyncMonitor();
+
+  // Always ensure we leave voice and stop stream on any end (natural or error)
+  const streamer = getStreamer();
+  try {
+    streamer.stopStream();
+  } catch {
+    // May already be stopped
+  }
+  try {
+    streamer.leaveVoice();
+  } catch {
+    // May already have left
+  }
+
   activeStream = null;
 }
 

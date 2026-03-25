@@ -85,12 +85,25 @@ export async function fetchStreams(
   return data.streams;
 }
 
-export function selectBestStream(
+export interface RankedStream {
+  stream: TorrentioStream;
+  resolution: number;
+  codec: string;
+  sizeBytes: number;
+  seeders: number;
+  label: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+  return "? MB";
+}
+
+function rankStreams(
   streams: TorrentioStream[],
   maxResolution: number = config.maxResolution
-): TorrentioStream | null {
-  if (streams.length === 0) return null;
-
+): RankedStream[] {
   const parsed: ParsedStreamInfo[] = streams.map((stream) => ({
     stream,
     resolution: parseResolution(stream.title, stream.behaviorHints?.bingeGroup),
@@ -106,30 +119,56 @@ export function selectBestStream(
 
   // If no eligible streams found, fall back to all streams with known resolution
   const candidates = eligible.length > 0 ? eligible : parsed.filter((s) => s.resolution > 0);
-  if (candidates.length === 0) {
-    // Last resort: pick first stream regardless
-    log.warn("No streams with parseable resolution, using first available");
-    return streams[0];
+  if (candidates.length === 0 && streams.length > 0) {
+    log.warn("No streams with parseable resolution, using all available");
+    return streams.slice(0, 5).map((s, i) => ({
+      stream: s,
+      resolution: 0,
+      codec: "unknown",
+      sizeBytes: 0,
+      seeders: 0,
+      label: `${i + 1}. ${s.name}`,
+    }));
   }
 
-  // Sort: highest resolution first, then prefer h264 (copy mode friendly),
-  // then largest file, then most seeders
+  // Sort: most seeders first (availability), then highest resolution, then h264, then size
   candidates.sort((a, b) => {
-    // Higher resolution preferred
+    if (a.seeders !== b.seeders) return b.seeders - a.seeders;
     if (a.resolution !== b.resolution) return b.resolution - a.resolution;
-    // Prefer h264 for potential copy mode
     const codecScore = (c: string) => (c === "h264" ? 1 : 0);
     if (codecScore(a.codec) !== codecScore(b.codec))
       return codecScore(b.codec) - codecScore(a.codec);
-    // Larger file = better quality
-    if (a.sizeBytes !== b.sizeBytes) return b.sizeBytes - a.sizeBytes;
-    // More seeders = more reliable
-    return b.seeders - a.seeders;
+    return b.sizeBytes - a.sizeBytes;
   });
 
-  const best = candidates[0];
+  return candidates.map((c, i) => ({
+    ...c,
+    label: `${i + 1}. ${c.resolution}p ${c.codec.toUpperCase()} | ${formatSize(c.sizeBytes)} | ${c.seeders} seeds`,
+  }));
+}
+
+export function getTopStreams(
+  streams: TorrentioStream[],
+  count: number = 5,
+  maxResolution: number = config.maxResolution
+): RankedStream[] {
+  const ranked = rankStreams(streams, maxResolution);
+  const top = ranked.slice(0, count);
+  for (const s of top) {
+    log.info(`Candidate: ${s.label}`);
+  }
+  return top;
+}
+
+export function selectBestStream(
+  streams: TorrentioStream[],
+  maxResolution: number = config.maxResolution
+): TorrentioStream | null {
+  const ranked = rankStreams(streams, maxResolution);
+  if (ranked.length === 0) return null;
+  const best = ranked[0];
   log.info(
-    `Selected: ${best.resolution}p ${best.codec} (${(best.sizeBytes / 1024 / 1024).toFixed(0)} MB, ${best.seeders} seeders)`
+    `Auto-selected: ${best.resolution}p ${best.codec} (${formatSize(best.sizeBytes)}, ${best.seeders} seeders)`
   );
   return best.stream;
 }

@@ -12,6 +12,8 @@ export interface StreamInfo {
   height: number;
   fps: number;
   videoBitrate: number;
+  hasBFrames: boolean;
+  isVFR: boolean;
 }
 
 interface FFprobeOutput {
@@ -23,6 +25,7 @@ interface FFprobeOutput {
     r_frame_rate?: string;
     bit_rate?: string;
     avg_frame_rate?: string;
+    has_b_frames?: number;
   }>;
   format: {
     bit_rate?: string;
@@ -45,8 +48,8 @@ export async function probeStream(url: string): Promise<StreamInfo> {
       "-print_format", "json",
       "-show_streams",
       "-show_format",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
+      "-analyzeduration", "2000000",
+      "-probesize", "2000000",
       url,
     ],
     { timeout: 30_000 }
@@ -61,8 +64,22 @@ export async function probeStream(url: string): Promise<StreamInfo> {
     throw new Error("No video stream found in source");
   }
 
-  const fpsStr = videoStream.r_frame_rate || videoStream.avg_frame_rate || "0/1";
-  const fps = Math.round(parseFraction(fpsStr));
+  const rFrameRate = parseFraction(videoStream.r_frame_rate || "0/1");
+  const avgFrameRate = parseFraction(videoStream.avg_frame_rate || "0/1");
+  const fps = Math.round(rFrameRate || avgFrameRate);
+
+  // Detect VFR: if r_frame_rate and avg_frame_rate differ by >10%, source is likely VFR.
+  // r_frame_rate is the "real" base rate, avg_frame_rate is the average over the analyzed
+  // portion. Significant divergence indicates variable frame timing.
+  const isVFR =
+    rFrameRate > 0 &&
+    avgFrameRate > 0 &&
+    Math.abs(rFrameRate - avgFrameRate) / rFrameRate > 0.1;
+
+  // Detect B-frames. The library warns: "B-frames disabled. Failure to do so will
+  // result in a glitchy stream." B-frames cause PTS != DTS (non-monotonic PTS in
+  // decode order) which breaks PTS-based pacing.
+  const hasBFrames = (videoStream.has_b_frames ?? 0) > 0;
 
   const videoBitrate = videoStream.bit_rate
     ? parseInt(videoStream.bit_rate, 10)
@@ -77,10 +94,13 @@ export async function probeStream(url: string): Promise<StreamInfo> {
     height: videoStream.height ?? 0,
     fps,
     videoBitrate,
+    hasBFrames,
+    isVFR,
   };
 
   log.info(
-    `Probe result: ${info.videoCodec} ${info.width}x${info.height}@${info.fps}fps, audio: ${info.audioCodec}`
+    `Probe result: ${info.videoCodec} ${info.width}x${info.height}@${info.fps}fps, ` +
+      `audio: ${info.audioCodec}, bframes: ${info.hasBFrames}, vfr: ${info.isVFR}`
   );
   return info;
 }
@@ -91,16 +111,32 @@ export function isCopyModeEligible(
   maxHeight: number,
   maxFps: number
 ): boolean {
+  // Copy mode requires ALL of:
+  // - H264 codec
+  // - Resolution within limits
+  // - FPS within limits
+  // - No B-frames (B-frames cause PTS != DTS, breaking PTS-based pacing)
+  // - Not VFR (variable frame rate causes uneven pacing in copy mode)
   const eligible =
     info.videoCodec === "h264" &&
     info.width <= maxWidth &&
     info.height <= maxHeight &&
-    info.fps <= maxFps;
+    info.fps <= maxFps &&
+    !info.hasBFrames &&
+    !info.isVFR;
+
+  const reasons: string[] = [];
+  if (info.videoCodec !== "h264") reasons.push(`codec=${info.videoCodec}`);
+  if (info.width > maxWidth || info.height > maxHeight)
+    reasons.push(`resolution=${info.width}x${info.height}`);
+  if (info.fps > maxFps) reasons.push(`fps=${info.fps}`);
+  if (info.hasBFrames) reasons.push("has B-frames");
+  if (info.isVFR) reasons.push("variable frame rate");
 
   log.info(
-    `Copy mode ${eligible ? "eligible" : "not eligible"}: ` +
-      `codec=${info.videoCodec} ${info.width}x${info.height}@${info.fps}fps ` +
-      `(max: ${maxWidth}x${maxHeight}@${maxFps}fps)`
+    eligible
+      ? `Copy mode eligible: ${info.videoCodec} ${info.width}x${info.height}@${info.fps}fps`
+      : `Copy mode not eligible: ${reasons.join(", ")} (max: ${maxWidth}x${maxHeight}@${maxFps}fps)`
   );
   return eligible;
 }

@@ -107,6 +107,18 @@ export async function resolveEpisode(
     };
   }
 
+  if (episode !== undefined && season === undefined) {
+    // Episode specified without season — default to season 1
+    log.info(`No season specified with episode ${episode}, defaulting to season 1`);
+    const seasonData = await getSeasonDetails(tmdbId, 1);
+    const ep = seasonData.episodes.find((e) => e.episode_number === episode);
+    return {
+      season: 1,
+      episode,
+      episodeName: ep?.name ?? `Episode ${episode}`,
+    };
+  }
+
   if (season !== undefined) {
     // Season specified, pick random episode
     const seasonData = await getSeasonDetails(tmdbId, season);

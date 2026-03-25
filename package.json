@@ -27,7 +27,10 @@
       "sharp",
       "zeromq",
       "esbuild"
-    ]
+    ],
+    "patchedDependencies": {
+      "@dank074/discord-video-stream": "patches/@dank074__discord-video-stream.patch"
+    }
   },
   "dependencies": {
     "@dank074/discord-video-stream": "^6.0.0",

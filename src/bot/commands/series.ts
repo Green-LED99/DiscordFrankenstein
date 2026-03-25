@@ -4,8 +4,9 @@ import {
   getExternalIds,
   resolveEpisode,
 } from "../../services/tmdb.js";
-import { fetchStreams, selectBestStream } from "../../services/torrentio.js";
+import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { startVideoStream } from "../../streamer/stream.js";
+import { pickStream } from "./picker.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("SeriesCmd");
@@ -62,29 +63,40 @@ export async function handleSeries(
     episode.season,
     episode.episode
   );
-  const bestStream = selectBestStream(streams);
+  const topStreams = getTopStreams(streams);
 
-  if (!bestStream) {
+  if (topStreams.length === 0) {
     await interaction.editReply(
       `No suitable streams found for **${show.name}** ${episodeLabel}.`
     );
     return;
   }
 
-  // 5. Start streaming
-  await interaction.editReply(
-    `Preparing to stream **${show.name}** ${episodeLabel} - ${episode.episodeName}...`
-  );
+  // 5. Let user pick a stream
+  const contentLabel = `${show.name} ${episodeLabel} - ${episode.episodeName}`;
+  const selected = await pickStream(interaction, topStreams, contentLabel);
+
+  if (!selected) {
+    return; // Timed out or cancelled
+  }
+
+  // 6. Start streaming
+  await interaction.editReply({
+    content: `Preparing to stream **${show.name}** ${episodeLabel} - ${episode.episodeName}...`,
+    components: [],
+  });
 
   try {
-    await startVideoStream(guildId, channelId, bestStream.url);
-    await interaction.editReply(
-      `Now streaming: **${show.name}** ${episodeLabel} - ${episode.episodeName} (${bestStream.name})`
-    );
+    await startVideoStream(guildId, channelId, selected.stream.url);
+    await interaction.editReply({
+      content: `Now streaming: **${show.name}** ${episodeLabel} - ${episode.episodeName} (${selected.stream.name})`,
+      components: [],
+    });
   } catch (err) {
     log.error(`Stream start failed: ${err}`);
-    await interaction.editReply(
-      `Failed to start stream for **${show.name}** ${episodeLabel}: ${err instanceof Error ? err.message : "Unknown error"}`
-    );
+    await interaction.editReply({
+      content: `Failed to start stream for **${show.name}** ${episodeLabel}: ${err instanceof Error ? err.message : "Unknown error"}`,
+      components: [],
+    });
   }
 }

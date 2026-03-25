@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("Sync");
@@ -8,6 +7,8 @@ interface SyncState {
   speeds: number[];
   warnings: number;
   onDrift?: () => void;
+  listener: (chunk: Buffer) => void;
+  stream: NodeJS.ReadableStream;
 }
 
 let activeSyncState: SyncState | null = null;
@@ -18,17 +19,9 @@ export function startSyncMonitor(
 ): void {
   stopSyncMonitor();
 
-  const state: SyncState = {
-    lastSpeedUpdate: Date.now(),
-    speeds: [],
-    warnings: 0,
-    onDrift,
-  };
-  activeSyncState = state;
-
   let buffer = "";
 
-  ffmpegStderr.on("data", (chunk: Buffer) => {
+  const listener = (chunk: Buffer) => {
     buffer += chunk.toString();
 
     // Parse FFmpeg progress lines for speed
@@ -48,7 +41,7 @@ export function startSyncMonitor(
         const avgSpeed =
           state.speeds.reduce((a, b) => a + b, 0) / state.speeds.length;
 
-        if (avgSpeed < 0.95) {
+        if (avgSpeed < 1.5) {
           state.warnings++;
           log.warn(
             `Encoding speed low: ${avgSpeed.toFixed(2)}x (warning ${state.warnings})`
@@ -61,7 +54,7 @@ export function startSyncMonitor(
             onDrift();
             state.warnings = 0;
           }
-        } else if (avgSpeed >= 0.98) {
+        } else if (avgSpeed >= 2.0) {
           // Reset warnings when speed is good
           state.warnings = Math.max(0, state.warnings - 1);
         }
@@ -78,11 +71,26 @@ export function startSyncMonitor(
     if (buffer.length > 4096) {
       buffer = buffer.slice(-2048);
     }
-  });
+  };
+
+  ffmpegStderr.on("data", listener);
+
+  const state: SyncState = {
+    lastSpeedUpdate: Date.now(),
+    speeds: [],
+    warnings: 0,
+    onDrift,
+    listener,
+    stream: ffmpegStderr,
+  };
+  activeSyncState = state;
 }
 
 export function stopSyncMonitor(): void {
-  activeSyncState = null;
+  if (activeSyncState) {
+    activeSyncState.stream.removeListener("data", activeSyncState.listener);
+    activeSyncState = null;
+  }
 }
 
 export function getSyncStatus(): {

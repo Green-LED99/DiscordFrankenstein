@@ -7,8 +7,16 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
   ERROR: 3,
 };
 
-const minLevel: LogLevel =
-  (process.env.LOG_LEVEL as LogLevel | undefined) ?? "INFO";
+const VALID_LEVELS: readonly string[] = ["DEBUG", "INFO", "WARN", "ERROR"];
+const rawLevel = process.env.LOG_LEVEL ?? "INFO";
+if (!VALID_LEVELS.includes(rawLevel)) {
+  console.error(
+    `[WARN] Invalid LOG_LEVEL "${rawLevel}", defaulting to INFO. Valid: ${VALID_LEVELS.join(", ")}`
+  );
+}
+const minLevel: LogLevel = VALID_LEVELS.includes(rawLevel)
+  ? (rawLevel as LogLevel)
+  : "INFO";
 
 function formatTimestamp(): string {
   return new Date().toISOString();

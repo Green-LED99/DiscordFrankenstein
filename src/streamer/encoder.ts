@@ -117,8 +117,8 @@ export async function autoTune(): Promise<TunedSettings> {
   const fpsOptions = [30, 24];
 
   let bestSettings: TunedSettings = {
-    width: config.maxResolution === 720 ? 1280 : 854,
-    height: config.maxResolution === 720 ? 720 : 480,
+    width: { 1080: 1920, 720: 1280, 480: 854 }[config.maxResolution] ?? 1280,
+    height: config.maxResolution,
     fps: config.maxFps,
     bitrate: config.videoBitrate,
     bitrateMax: Math.round(config.videoBitrate * 1.4),
@@ -136,7 +136,7 @@ export async function autoTune(): Promise<TunedSettings> {
       "medium",
       hwAccel
     );
-    if (speed >= 0.98) {
+    if (speed >= 2.0) {
       bestSettings.preset = "medium";
       log.info(
         `Hardware encoder works: ${hwAccel} at ${bestSettings.width}x${bestSettings.height}@${bestSettings.fps}fps (speed: ${speed.toFixed(2)}x)`
@@ -155,7 +155,7 @@ export async function autoTune(): Promise<TunedSettings> {
         const speed = await runBenchmark(w, h, fps, bestSettings.bitrate, preset, "none");
         log.info(`Benchmark: ${w}x${h}@${fps}fps preset=${preset} -> speed=${speed.toFixed(2)}x`);
 
-        if (speed >= 0.98) {
+        if (speed >= 2.0) {
           bestSettings = {
             ...bestSettings,
             width: w,
@@ -201,13 +201,42 @@ export function getEncoderSettings(tuned: TunedSettings): EncoderSettingsGetter 
   });
 }
 
+// Input options applied BEFORE -i for HTTP source handling.
+// Matches WrappedStream's proven configuration.
+// -fflags +nobuffer+genpts+discardcorrupt: low-latency, generate PTS, drop corrupt
+// -flags low_delay: minimize codec-level buffering
+// -thread_queue_size 4096: prevent "Thread message queue blocking" on HTTP input
+// -analyzeduration / -probesize: longer analysis for HTTP/RealDebrid sources
+const SYNC_INPUT_OPTIONS: string[] = [
+  "-fflags", "+nobuffer+genpts+discardcorrupt",
+  "-flags", "low_delay",
+  "-thread_queue_size", "4096",
+  "-analyzeduration", "10000000",
+  "-probesize", "10000000",
+];
+
+// Output options for NUT muxer.
+// -avoid_negative_ts make_zero: normalize negative timestamps
+// Keep minimal — the library handles A/V sync via PTS-based pacing.
+const SYNC_OUTPUT_OPTIONS: string[] = [
+  "-avoid_negative_ts", "make_zero",
+];
+
 export function buildStreamOptions(
   sourceInfo: StreamInfo,
   tuned: TunedSettings,
   copyMode: boolean
 ): Partial<PrepareStreamOptions> {
   if (copyMode) {
-    log.info("Using copy mode (no transcoding)");
+    // noTranscoding only affects video (copies H264 as-is).
+    // The library always transcodes audio to libopus regardless.
+    // -bsf:v h264_mp4toannexb overrides the NUT muxer's auto-inserted
+    // h264_metadata BSF which crashes on many Torrentio streams with
+    // "Invalid NAL unit size" errors. h264_mp4toannexb only does Annex-B
+    // conversion without parsing NAL metadata.
+    log.info(
+      `Using copy mode (video passthrough H264, audio -> opus from ${sourceInfo.audioCodec})`
+    );
     return {
       noTranscoding: true,
       width: sourceInfo.width,
@@ -221,11 +250,20 @@ export function buildStreamOptions(
       hardwareAcceleratedDecoding: false,
       minimizeLatency: false,
       encoder: Encoders.software(),
+      customInputOptions: SYNC_INPUT_OPTIONS,
+      customFfmpegFlags: [
+        ...SYNC_OUTPUT_OPTIONS,
+        "-bsf:v", "h264_mp4toannexb",
+      ],
     };
   }
 
+  // Use source framerate if within limits, avoiding 24→30 judder from 3:2 pulldown.
+  // Only upscale fps if source is below a minimum threshold.
+  const outputFps = Math.min(sourceInfo.fps > 0 ? sourceInfo.fps : tuned.fps, tuned.fps);
+
   log.info(
-    `Transcoding to ${tuned.width}x${tuned.height}@${tuned.fps}fps ` +
+    `Transcoding to ${tuned.width}x${tuned.height}@${outputFps}fps ` +
       `(${tuned.preset}, ${tuned.hwAccel}, ${tuned.bitrate}kbps)`
   );
 
@@ -233,7 +271,7 @@ export function buildStreamOptions(
     noTranscoding: false,
     width: tuned.width,
     height: tuned.height,
-    frameRate: tuned.fps,
+    frameRate: outputFps,
     videoCodec: "H264",
     bitrateVideo: tuned.bitrate,
     bitrateVideoMax: tuned.bitrateMax,
@@ -242,11 +280,28 @@ export function buildStreamOptions(
     hardwareAcceleratedDecoding: tuned.hwAccel !== "none",
     minimizeLatency: false,
     encoder: getEncoderSettings(tuned),
+    customInputOptions: SYNC_INPUT_OPTIONS,
     customFfmpegFlags: [
-      "-async", "1",
-      "-vsync", "cfr",
-      "-g", `${tuned.fps * 2}`,
-      "-keyint_min", `${tuned.fps * 2}`,
+      // A/V sync: constant frame rate, no frame drops
+      "-fps_mode", "cfr",
+      // Keyframe every 1 second (matching library's force_key_frames)
+      "-g", `${outputFps}`,
+      "-keyint_min", `${outputFps}`,
+      // Encoder-specific flags
+      ...(tuned.hwAccel === "nvidia"
+        ? [
+            // NVENC: no lookahead, no encoder delay, no B-frames, force IDR
+            // -bf 0 is critical: B-frames cause PTS!=DTS which breaks DAVE
+            // -no-scenecut disables scene-change IDR (NVENC-specific flag)
+            "-rc-lookahead", "0", "-delay", "0", "-forced-idr", "1",
+            "-bf", "0", "-no-scenecut", "1",
+          ]
+        : [
+            // Software x264: high sc_threshold effectively disables scene IDR
+            "-sc_threshold", "40",
+          ]),
+      // NUT muxer options
+      ...SYNC_OUTPUT_OPTIONS,
     ],
   };
 }

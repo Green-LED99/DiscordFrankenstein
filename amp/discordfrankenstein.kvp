@@ -1,34 +1,37 @@
-[Application]
+Meta.DisplayName=DiscordFrankenstein
+Meta.Description=Discord bot that streams movies and TV series to voice channels via Go Live
+Meta.OS=Windows, Linux
+Meta.Arch=x86_64
+Meta.Author=Green-LED99
+Meta.URL=https://github.com/Green-LED99/DiscordFrankenstein
+Meta.DisplayImageSource=none:
+Meta.EndpointURIFormat=
+Meta.ConfigManifest=discordfrankensteinconfig.json
+Meta.MetaConfigManifest=discordfrankensteinmetaconfig.json
+Meta.ConfigRoot=discordfrankenstein.kvp
+Meta.MinAMPVersion=2.5.0.0
+Meta.SpecificDockerImage=
+Meta.DockerRequired=False
+Meta.ContainerPolicy=Supported
+Meta.ExtraContainerPackages=["nodejs","ffmpeg","git"]
+Meta.ConfigVersion=2
+Meta.AppConfigId=df7a3c21-b4e8-4f6a-9d2e-1a8b5c6d7e8f
 App.DisplayName=DiscordFrankenstein
-App.RootDir=./discordfrankenstein/
+App.RootDir=./
 App.WorkingDir=./
 App.ExecutableWin=node.exe
 App.ExecutableLinux=node
 App.CommandLineArgs=dist/index.js
-App.EnvironmentVariables={"BOT_TOKEN": "{{BotToken}}", "USER_TOKEN": "{{UserToken}}", "TMDB_API_KEY": "{{TmdbApiKey}}", "STREMIO_ADDON_URL": "{{StremioAddonUrl}}", "MAX_RESOLUTION": "{{MaxResolution}}", "MAX_FPS": "{{MaxFps}}", "VIDEO_BITRATE": "{{VideoBitrate}}", "HARDWARE_ACCEL": "{{HardwareAccel}}"}
-App.AppSettings={"BotToken": "", "UserToken": "", "TmdbApiKey": "", "StremioAddonUrl": "", "MaxResolution": "720", "MaxFps": "30", "VideoBitrate": "2500", "HardwareAccel": "auto"}
+App.EnvironmentVariables={"BOT_TOKEN":"{{BotToken}}","USER_TOKEN":"{{UserToken}}","TMDB_API_KEY":"{{TmdbApiKey}}","STREMIO_ADDON_URL":"{{StremioAddonUrl}}","MAX_RESOLUTION":"{{MaxResolution}}","MAX_FPS":"{{MaxFps}}","VIDEO_BITRATE":"{{VideoBitrate}}","HARDWARE_ACCEL":"{{HardwareAccel}}"}
+App.AppSettings={"BotToken":"","UserToken":"","TmdbApiKey":"","StremioAddonUrl":"","MaxResolution":"720","MaxFps":"30","VideoBitrate":"2500","HardwareAccel":"auto"}
 App.ExitMethod=CtrlC
-App.HasWritableConsole=true
+App.HasWriteableConsole=true
 App.HasReadableConsole=true
 App.AdminMethod=STDIO
 App.MaxUsers=50
 App.ApplicationPort1=0
 App.Compatibility=0
 App.MonitorChildProcessName=ffmpeg
-
-App.UpdateSources=[{"UpdateStageName":"Install Node.js dependencies","UpdateSource":"Executable","UpdateSourceData":"pnpm","UpdateSourceArgs":"install --frozen-lockfile","UpdateSourcePlatform":"All"},{"UpdateStageName":"Build TypeScript","UpdateSource":"Executable","UpdateSourceData":"pnpm","UpdateSourceArgs":"build","UpdateSourcePlatform":"All"}]
-
-[Console]
+App.UpdateSources=[{"UpdateStageName":"Install dependencies","UpdateSource":"Executable","UpdateSourceData":"pnpm","UpdateSourceArgs":"install --frozen-lockfile","UpdateSourcePlatform":"All"},{"UpdateStageName":"Build TypeScript","UpdateSource":"Executable","UpdateSourceData":"pnpm","UpdateSourceArgs":"build","UpdateSourcePlatform":"All"}]
 Console.AppReadyRegex=^.*Bot ready.*$
 Console.FilterMatchRegex=^.*\[DEBUG\].*$
-
-[Meta]
-Meta.DisplayName=DiscordFrankenstein
-Meta.OS=3
-Meta.AppConfigId=df7a3c21-b4e8-4f6a-9d2e-1a8b5c6d7e8f
-Meta.Author=DiscordFrankenstein
-Meta.DisplayImageSource=none:
-Meta.MinAMPVersion=2.5.0.0
-Meta.ConfigVersion=1
-Meta.ContainerPolicy=SupportedOnLinux
-Meta.ExtraContainerPackages=["nodejs", "npm", "ffmpeg", "git"]

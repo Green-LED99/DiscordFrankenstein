@@ -1,7 +1,8 @@
 import type { ChatInputCommandInteraction, GuildMember } from "discord.js";
 import { searchMovie, getExternalIds } from "../../services/tmdb.js";
-import { fetchStreams, selectBestStream } from "../../services/torrentio.js";
+import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { startVideoStream } from "../../streamer/stream.js";
+import { pickStream } from "./picker.js";
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("MovieCmd");
@@ -41,29 +42,40 @@ export async function handleMovie(
     `Found **${movie.title}** (${year}). Fetching streams...`
   );
   const streams = await fetchStreams("movie", imdbId);
-  const bestStream = selectBestStream(streams);
+  const topStreams = getTopStreams(streams);
 
-  if (!bestStream) {
+  if (topStreams.length === 0) {
     await interaction.editReply(
       `No suitable streams found for **${movie.title}** (${year}).`
     );
     return;
   }
 
-  // 4. Start streaming
-  await interaction.editReply(
-    `Preparing to stream **${movie.title}** (${year})...`
-  );
+  // 4. Let user pick a stream
+  const contentLabel = `${movie.title} (${year})`;
+  const selected = await pickStream(interaction, topStreams, contentLabel);
+
+  if (!selected) {
+    return; // Timed out or cancelled
+  }
+
+  // 5. Start streaming
+  await interaction.editReply({
+    content: `Preparing to stream **${contentLabel}**...`,
+    components: [],
+  });
 
   try {
-    await startVideoStream(guildId, channelId, bestStream.url);
-    await interaction.editReply(
-      `Now streaming: **${movie.title}** (${year}) - ${bestStream.name}`
-    );
+    await startVideoStream(guildId, channelId, selected.stream.url);
+    await interaction.editReply({
+      content: `Now streaming: **${contentLabel}** - ${selected.stream.name}`,
+      components: [],
+    });
   } catch (err) {
     log.error(`Stream start failed: ${err}`);
-    await interaction.editReply(
-      `Failed to start stream for **${movie.title}** (${year}): ${err instanceof Error ? err.message : "Unknown error"}`
-    );
+    await interaction.editReply({
+      content: `Failed to start stream for **${contentLabel}**: ${err instanceof Error ? err.message : "Unknown error"}`,
+      components: [],
+    });
   }
 }
