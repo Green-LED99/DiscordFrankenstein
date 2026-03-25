@@ -1,0 +1,87 @@
+[
+  {
+    "DisplayName": "Bot Token",
+    "Description": "Discord bot token from the Developer Portal",
+    "FieldName": "BotToken",
+    "InputType": "password",
+    "Category": "Authentication",
+    "Required": true,
+    "Placeholder": "MTQ4..."
+  },
+  {
+    "DisplayName": "User Token",
+    "Description": "Discord user token for the selfbot streamer",
+    "FieldName": "UserToken",
+    "InputType": "password",
+    "Category": "Authentication",
+    "Required": true,
+    "Placeholder": "MTI4..."
+  },
+  {
+    "DisplayName": "TMDB API Key",
+    "Description": "API key from The Movie Database (themoviedb.org)",
+    "FieldName": "TmdbApiKey",
+    "InputType": "password",
+    "Category": "Authentication",
+    "Required": true,
+    "Placeholder": "a9ee6dc..."
+  },
+  {
+    "DisplayName": "Stremio Addon URL",
+    "Description": "Full Torrentio addon URL with RealDebrid configuration",
+    "FieldName": "StremioAddonUrl",
+    "InputType": "text",
+    "Category": "Authentication",
+    "Required": true,
+    "Placeholder": "https://torrentio.strem.fun/..."
+  },
+  {
+    "DisplayName": "Max Resolution",
+    "Description": "Maximum video output resolution",
+    "FieldName": "MaxResolution",
+    "InputType": "enum",
+    "Category": "Streaming",
+    "DefaultValue": "720",
+    "EnumValues": {
+      "720p": "720",
+      "480p": "480"
+    }
+  },
+  {
+    "DisplayName": "Max FPS",
+    "Description": "Maximum video framerate",
+    "FieldName": "MaxFps",
+    "InputType": "enum",
+    "Category": "Streaming",
+    "DefaultValue": "30",
+    "EnumValues": {
+      "30 FPS": "30",
+      "24 FPS": "24"
+    }
+  },
+  {
+    "DisplayName": "Video Bitrate (kbps)",
+    "Description": "Target video bitrate in kilobits per second",
+    "FieldName": "VideoBitrate",
+    "InputType": "number",
+    "Category": "Streaming",
+    "DefaultValue": "2500",
+    "minValue": "1000",
+    "maxValue": "5000",
+    "Suffix": "kbps"
+  },
+  {
+    "DisplayName": "Hardware Acceleration",
+    "Description": "Video encoding hardware acceleration mode",
+    "FieldName": "HardwareAccel",
+    "InputType": "enum",
+    "Category": "Streaming",
+    "DefaultValue": "auto",
+    "EnumValues": {
+      "Auto-detect": "auto",
+      "NVIDIA (NVENC)": "nvidia",
+      "VAAPI (Intel/AMD)": "vaapi",
+      "None (CPU only)": "none"
+    }
+  }
+]
