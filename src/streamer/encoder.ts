@@ -268,6 +268,8 @@ export function buildStreamOptions(
     log.info(`Seeking to ${seekSeconds.toFixed(1)}s`);
   }
 
+  // Note: -extension_picky 0 for HLS is handled in the library patch (after headers)
+
   return {
     noTranscoding: false,
     width: tuned.width,

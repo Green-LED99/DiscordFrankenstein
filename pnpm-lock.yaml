@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   '@dank074/discord-video-stream':
-    hash: 968a4e010c67d6eb83ab4a143f75a083ae9088086b9de23c800234a395e6546d
+    hash: 7554e9a694ff1dcafd697cf335c1a867176d00a50928558c24e05e075d5b551f
     path: patches/@dank074__discord-video-stream.patch
 
 importers:
@@ -15,7 +15,7 @@ importers:
     dependencies:
       '@dank074/discord-video-stream':
         specifier: 6.0.0
-        version: 6.0.0(patch_hash=968a4e010c67d6eb83ab4a143f75a083ae9088086b9de23c800234a395e6546d)(discord.js-selfbot-v13@3.7.1)
+        version: 6.0.0(patch_hash=7554e9a694ff1dcafd697cf335c1a867176d00a50928558c24e05e075d5b551f)(discord.js-selfbot-v13@3.7.1)
       discord.js:
         specifier: ^14.25.1
         version: 14.25.1
@@ -1286,7 +1286,7 @@ snapshots:
 
   '@babel/runtime@7.29.2': {}
 
-  '@dank074/discord-video-stream@6.0.0(patch_hash=968a4e010c67d6eb83ab4a143f75a083ae9088086b9de23c800234a395e6546d)(discord.js-selfbot-v13@3.7.1)':
+  '@dank074/discord-video-stream@6.0.0(patch_hash=7554e9a694ff1dcafd697cf335c1a867176d00a50928558c24e05e075d5b551f)(discord.js-selfbot-v13@3.7.1)':
     dependencies:
       '@lng2004/node-datachannel': 0.32.0-20260202
       '@snazzah/davey': 0.1.10

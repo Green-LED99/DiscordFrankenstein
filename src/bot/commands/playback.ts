@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-import { setTimeout as sleep } from "node:timers/promises";
+// sleep removed — teardownStream handles verified kill, no arbitrary delays needed
 import {
   isStreaming,
   isLiveStream,
@@ -13,6 +13,7 @@ import {
   isAutoplayEnabled,
   setAutoplay,
   setAutoplayCallback,
+  getLastKnownVoiceChannel,
   type SeriesInfo,
 } from "../../streamer/stream.js";
 import { getNextEpisode } from "../../services/cinemeta.js";
@@ -98,6 +99,7 @@ export async function handlePlay(
       false,
       paused.elapsedSec,
       paused.contentTitle,
+      paused.seriesInfo ?? undefined,
     );
 
     clearPausedState();
@@ -158,9 +160,7 @@ export async function handleSkip(
     // Save current stream info before stopping
     const info = getPlaybackInfo()!;
     // Pause saves state, then we modify the elapsed time
-    await pauseStream();
-    // Wait for FFmpeg to fully terminate before starting new stream
-    await sleep(1000);
+    await pauseStream({ preserveVoice: true });
     const saved = getPausedState()!;
     saved.elapsedSec = newElapsed;
 
@@ -186,6 +186,7 @@ export async function handleSkip(
       false,
       newElapsed,
       saved.contentTitle,
+      saved.seriesInfo ?? undefined,
     );
 
     clearPausedState();
@@ -240,9 +241,7 @@ export async function handleSeek(
   await interaction.editReply(`⏩ Seeking to ${timeStr} in **${title}**...`);
 
   try {
-    await pauseStream();
-    // Wait for FFmpeg to fully terminate before starting new stream
-    await sleep(1000);
+    await pauseStream({ preserveVoice: true });
     const saved = getPausedState()!;
     saved.elapsedSec = targetSec;
 
@@ -268,6 +267,7 @@ export async function handleSeek(
       false,
       targetSec,
       saved.contentTitle,
+      saved.seriesInfo ?? undefined,
     );
 
     clearPausedState();
@@ -401,7 +401,6 @@ async function playNextEpisode(
   // Stop current stream if running
   if (isStreaming()) {
     await stopVideoStream();
-    await sleep(1000);
   }
 
   // Get guild/channel from current stream or paused state
@@ -491,9 +490,6 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
   const selected = topStreams[0];
   log.info(`Autoplay: selected ${selected.label}`);
 
-  // Wait for cleanup to finish
-  await sleep(2000);
-
   const newSeriesInfo: SeriesInfo = {
     showId: series.showId,
     showName: series.showName,
@@ -501,8 +497,10 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
     episode: nextEp.episode,
   };
 
-  // We need guild/channel — store them in a module-level variable
-  const { guildId, channelId } = getLastKnownChannel();
+  // Get guild/channel from stream.ts (set by every startVideoStreamInner)
+  const lastChannel = getLastKnownVoiceChannel();
+  const guildId = lastChannel?.guildId ?? null;
+  const channelId = lastChannel?.channelId ?? null;
 
   if (!guildId || !channelId) {
     log.error("Autoplay: no guild/channel available");
@@ -520,15 +518,4 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
   registerAutoplayCallback(newSeriesInfo);
 }
 
-// Store last known guild/channel for autoplay (set when any stream starts)
-let lastGuildId: string | null = null;
-let lastChannelId: string | null = null;
-
-export function setLastKnownChannel(guildId: string, channelId: string): void {
-  lastGuildId = guildId;
-  lastChannelId = channelId;
-}
-
-function getLastKnownChannel(): { guildId: string | null; channelId: string | null } {
-  return { guildId: lastGuildId, channelId: lastChannelId };
-}
+// Channel tracking moved to stream.ts (getLastKnownVoiceChannel)

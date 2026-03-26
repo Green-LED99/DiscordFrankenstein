@@ -133,7 +133,7 @@ index 3bf6f2a7e8bd41c904af813b350ea1a756bfa380..884c34bd65f093efa603052b6f79adf8
          frame.free();
      }
 diff --git a/dist/media/newApi.js b/dist/media/newApi.js
-index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..6bdab700749274f6b8be21792e0c0c0219977e71 100644
+index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..ddb742b29635858ceac3b4c33c68cb97f4dff5e3 100644
 --- a/dist/media/newApi.js
 +++ b/dist/media/newApi.js
 @@ -67,6 +67,9 @@ export function prepareStream(input, options = {}, cancelSignal) {
@@ -146,25 +146,40 @@ index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..6bdab700749274f6b8be21792e0c0c02
          };
      }
      const mergedOptions = mergeOptions(options);
-@@ -95,9 +98,14 @@ export function prepareStream(input, options = {}, cancelSignal) {
+@@ -75,7 +78,7 @@ export function prepareStream(input, options = {}, cancelSignal) {
+     let isSrt = false;
+     if (typeof input === "string") {
+         isHttpUrl = input.startsWith("http") || input.startsWith("https");
+-        isHls = input.includes("m3u");
++        isHls = input.includes("m3u") || /\/playlist\b/i.test(input);
+         isSrt = input.startsWith("srt://");
+     }
+     const output = new PassThrough();
+@@ -93,10 +96,20 @@ export function prepareStream(input, options = {}, cancelSignal) {
          command.addOptions(["-fflags nobuffer", "-analyzeduration 0"]);
      }
      if (isHttpUrl) {
 -        command.inputOption("-headers", Object.entries(customHeaders)
--            .map(([k, v]) => `${k}: ${v}`)
--            .join("\r\n"));
 +        // Patched: separate User-Agent for HLS compatibility
 +        const ua = customHeaders["User-Agent"];
 +        if (ua) command.inputOption("-user_agent", ua);
 +        const otherHeaders = Object.entries(customHeaders)
 +            .filter(([k]) => k !== "User-Agent")
-+            .map(([k, v]) => `${k}: ${v}`)
+             .map(([k, v]) => `${k}: ${v}`)
+-            .join("\r\n"));
+-        if (!isHls) {
 +            .join("\r\n");
 +        if (otherHeaders) command.inputOption("-headers", otherHeaders);
-         if (!isHls) {
++        if (isHls) {
++            // HLS with non-standard segment extensions — must be AFTER headers
++            command.inputOption("-extension_picky", "0");
++        }
++        else {
++            // Reconnect is for direct HTTP only — HLS handles reconnection internally
              command.inputOptions([
                  "-reconnect 1",
-@@ -118,6 +126,17 @@ export function prepareStream(input, options = {}, cancelSignal) {
+                 "-reconnect_at_eof 1",
+@@ -118,6 +131,17 @@ export function prepareStream(input, options = {}, cancelSignal) {
      }
      else {
          command.videoFilter(`scale=${width}:${height}`);
@@ -176,14 +191,13 @@ index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..6bdab700749274f6b8be21792e0c0c02
 +                .replace(/'/g, "\\\\'")
 +                .replace(/\[/g, "\\\\[")
 +                .replace(/\]/g, "\\\\]")
-+                .replace(/;/g, "\\\\;")
-+                .replace(/ /g, "\\\\ ");
++                .replace(/;/g, "\\\\;");
 +            command.videoFilter(`subtitles=${escaped}:force_style='Fontsize=24'`);
 +        }
          if (frameRate)
              command.fpsOutput(frameRate);
          command.addOutputOption([
-@@ -147,7 +161,7 @@ export function prepareStream(input, options = {}, cancelSignal) {
+@@ -147,7 +171,7 @@ export function prepareStream(input, options = {}, cancelSignal) {
      const { includeAudio, bitrateAudio } = mergedOptions;
      if (includeAudio)
          command
@@ -215,7 +229,7 @@ index 997d78ea86793dea2ac11532aa0a8c85efe2197b..02f2abba98b74f5b7c6c32ff6d7f2f00
        case "H264":
          this._videoPacketizer = new H264RtpPacketizer(
 diff --git a/src/media/BaseMediaStream.ts b/src/media/BaseMediaStream.ts
-index 6a53ad1490979bbb782599efca0eaf5a640a5d28..95cd3093451f77904fc64cebba6e12dbde593408 100644
+index 6a53ad1490979bbb782599efca0eaf5a640a5d28..12a1408571fbbe52f1678da827586885fbbe8687 100644
 --- a/src/media/BaseMediaStream.ts
 +++ b/src/media/BaseMediaStream.ts
 @@ -5,7 +5,7 @@ import type { Packet } from "node-av";
@@ -238,7 +252,20 @@ index 6a53ad1490979bbb782599efca0eaf5a640a5d28..95cd3093451f77904fc64cebba6e12db
    async _write(
      frame: Packet,
      _: BufferEncoding,
-@@ -141,50 +145,33 @@ export class BaseMediaStream extends Writable {
+@@ -98,6 +102,12 @@ export class BaseMediaStream extends Writable {
+       callback();
+       return;
+     }
++    // Diagnostic: count frames and log stats every 300 frames
++    (this as any)._frameCount = ((this as any)._frameCount ?? 0) + 1;
++    (this as any)._sleepZeroCount = (this as any)._sleepZeroCount ?? 0;
++    (this as any)._deficitResetCount = (this as any)._deficitResetCount ?? 0;
++    (this as any)._driftCorrCount = (this as any)._driftCorrCount ?? 0;
++    (this as any)._lastStatsTime = (this as any)._lastStatsTime ?? performance.now();
+ 
+     const frametime = (Number(duration) / timeBase.den) * timeBase.num * 1000;
+ 
+@@ -141,50 +151,46 @@ export class BaseMediaStream extends Writable {
          frametime -
          (end_sendFrame - this._startTime),
      );
@@ -260,9 +287,11 @@ index 6a53ad1490979bbb782599efca0eaf5a640a5d28..95cd3093451f77904fc64cebba6e12db
 -    } else if (this.sync && this.isAhead()) {
 -      do {
 +    } else if (sleep === 0) {
++      (this as any)._sleepZeroCount++;
 +      const deficit = (end_sendFrame - this._startTime) -
 +        (this._pts - this._startPts + frametime);
 +      if (deficit > 200) {
++        (this as any)._deficitResetCount++;
          this._loggerSync.debug(
 -          {
 -            stats: {
@@ -306,13 +335,24 @@ index 6a53ad1490979bbb782599efca0eaf5a640a5d28..95cd3093451f77904fc64cebba6e12db
 +          adjustedSleep = sleep + drift;
 +        }
 +      }
++      if (adjustedSleep !== sleep) (this as any)._driftCorrCount++;
 +      await this.precisionSleep(adjustedSleep);
 +      callback(null);
++    }
++    // Periodic stats (every 300 frames ≈ 10s at 30fps)
++    if ((this as any)._frameCount % 300 === 0) {
++      const elapsed = ((performance.now() - (this as any)._lastStatsTime) / 1000).toFixed(1);
++      const heap = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
++      console.log(`[DIAG] ${(this as any)._frameCount} frames in ${elapsed}s | sleep0=${(this as any)._sleepZeroCount} deficitReset=${(this as any)._deficitResetCount} driftCorr=${(this as any)._driftCorrCount} | pts=${this._pts?.toFixed(0)} | heap=${heap}MB`);
++      (this as any)._sleepZeroCount = 0;
++      (this as any)._deficitResetCount = 0;
++      (this as any)._driftCorrCount = 0;
++      (this as any)._lastStatsTime = performance.now();
      }
      frame.free();
    }
 diff --git a/src/media/newApi.ts b/src/media/newApi.ts
-index 3b8682afaaa7917d4d5f394d01af73a693761018..743ffeecc727bda6d57a4aaace38049584677683 100644
+index 3b8682afaaa7917d4d5f394d01af73a693761018..0b37d59602b5d32f57693ea574f5cb3b21ccd5bf 100644
 --- a/src/media/newApi.ts
 +++ b/src/media/newApi.ts
 @@ -192,7 +192,10 @@ export function prepareStream(
@@ -327,7 +367,43 @@ index 3b8682afaaa7917d4d5f394d01af73a693761018..743ffeecc727bda6d57a4aaace380495
    }
  
    const mergedOptions = mergeOptions(options);
-@@ -270,6 +273,18 @@ export function prepareStream(
+@@ -203,7 +206,7 @@ export function prepareStream(
+ 
+   if (typeof input === "string") {
+     isHttpUrl = input.startsWith("http") || input.startsWith("https");
+-    isHls = input.includes("m3u");
++    isHls = input.includes("m3u") || /\/playlist\b/i.test(input);
+     isSrt = input.startsWith("srt://");
+   }
+ 
+@@ -229,13 +232,19 @@ export function prepareStream(
+   }
+ 
+   if (isHttpUrl) {
+-    command.inputOption(
+-      "-headers",
+-      Object.entries(customHeaders)
+-        .map(([k, v]) => `${k}: ${v}`)
+-        .join("\r\n"),
+-    );
+-    if (!isHls) {
++    // Patched: separate User-Agent for HLS compatibility
++    const ua = customHeaders["User-Agent"];
++    if (ua) command.inputOption("-user_agent", ua);
++    const otherHeaders = Object.entries(customHeaders)
++      .filter(([k]) => k !== "User-Agent")
++      .map(([k, v]) => `${k}: ${v}`)
++      .join("\r\n");
++    if (otherHeaders) command.inputOption("-headers", otherHeaders);
++    if (isHls) {
++      // HLS with non-standard segment extensions — must be AFTER headers
++      command.inputOption("-extension_picky", "0");
++    } else {
++      // Reconnect is for direct HTTP only — HLS handles reconnection internally
+       command.inputOptions([
+         "-reconnect 1",
+         "-reconnect_at_eof 1",
+@@ -270,6 +279,18 @@ export function prepareStream(
    } else {
      command.videoFilter(`scale=${width}:${height}`);
  
@@ -346,7 +422,7 @@ index 3b8682afaaa7917d4d5f394d01af73a693761018..743ffeecc727bda6d57a4aaace380495
      if (frameRate) command.fpsOutput(frameRate);
  
      command.addOutputOption([
-@@ -301,7 +316,7 @@ export function prepareStream(
+@@ -301,7 +322,7 @@ export function prepareStream(
    const { includeAudio, bitrateAudio } = mergedOptions;
    if (includeAudio)
      command

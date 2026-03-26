@@ -6,7 +6,7 @@ import { probeStream } from "../../services/ffprobe.js";
 import { startVideoStream, isAutoplayEnabled } from "../../streamer/stream.js";
 import { pickStream } from "./picker.js";
 import { pickAudioTrack, pickSubtitleTrack } from "./options.js";
-import { setLastKnownChannel } from "./playback.js";
+// Channel tracking now handled automatically by stream.ts
 import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("SeriesCmd");
@@ -107,7 +107,6 @@ export async function handleSeries(
   });
 
   try {
-    setLastKnownChannel(guildId, channelId);
     await startVideoStream(guildId, channelId, selected.stream.url, audioStreamIndex, subtitlePath, sourceInfo, undefined, false, undefined, contentLabel, {
       showId: show.id,
       showName: show.name,

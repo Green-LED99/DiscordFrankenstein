@@ -72,6 +72,7 @@ export async function probeStream(
 
   // For HLS/authenticated streams, inject headers before the URL.
   // User-Agent must use -user_agent (HLS demuxer only propagates this dedicated flag).
+  // -extension_picky 0 allows HLS segments with non-standard extensions (e.g., .txt).
   if (headers) {
     const ua = headers["User-Agent"];
     if (ua) args.push("-user_agent", ua);
@@ -80,6 +81,7 @@ export async function probeStream(
       .map(([k, v]) => `${k}: ${v}\r\n`)
       .join("");
     if (otherHeaders) args.push("-headers", otherHeaders);
+    args.push("-extension_picky", "0");
   }
 
   args.push(url); // URL must be LAST

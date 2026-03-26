@@ -1,6 +1,8 @@
 import { prepareStream, playStream } from "@dank074/discord-video-stream";
 import { rm } from "node:fs/promises";
 import { dirname } from "node:path";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import { getStreamer } from "./client.js";
 import { autoTune, buildStreamOptions } from "./encoder.js";
 import { probeStream, type StreamInfo } from "../services/ffprobe.js";
@@ -8,9 +10,79 @@ import { startSyncMonitor, stopSyncMonitor } from "../utils/sync.js";
 import { createLogger, errStr } from "../utils/logger.js";
 
 const log = createLogger("Stream");
+const execFileAsync = promisify(execFileCb);
+
+// ── FFmpeg Process Kill with Verification ──────────────────────────────
+
+/** Kill all ffmpeg processes via OS and VERIFY they are dead. */
+async function killAllFfmpegAndVerify(
+  ffmpegCommand?: { kill: (signal: string) => void }
+): Promise<void> {
+  log.debug("killAllFfmpegAndVerify: starting...");
+
+  // Step 1: Direct kill via fluent-ffmpeg command object
+  if (ffmpegCommand) {
+    try { ffmpegCommand.kill("SIGKILL"); } catch { /* already dead or never started */ }
+  }
+
+  // Step 2: OS-level kill
+  await killAllFfmpegOs();
+
+  // Step 3: Poll to verify (up to 3 attempts, 500ms apart)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const alive = await isAnyFfmpegRunning();
+    if (!alive) {
+      log.debug(`killAllFfmpegAndVerify: confirmed dead (attempt ${attempt})`);
+      return;
+    }
+    log.warn(`killAllFfmpegAndVerify: ffmpeg still alive (attempt ${attempt}), retrying...`);
+    await killAllFfmpegOs();
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // Final check
+  const stillAlive = await isAnyFfmpegRunning();
+  if (stillAlive) {
+    log.error("CRITICAL: FFmpeg still alive after 3 kill attempts");
+  } else {
+    log.debug("killAllFfmpegAndVerify: confirmed dead after retries");
+  }
+}
+
+async function killAllFfmpegOs(): Promise<void> {
+  const isWin = process.platform === "win32";
+  const cmd = isWin ? "taskkill" : "pkill";
+  const args = isWin ? ["/F", "/IM", "ffmpeg.exe"] : ["-9", "ffmpeg"];
+  try {
+    await execFileAsync(cmd, args);
+    log.debug("killAllFfmpegOs: kill command succeeded");
+  } catch {
+    // "no matching processes" is expected
+    log.debug("killAllFfmpegOs: no processes to kill (or already dead)");
+  }
+}
+
+async function isAnyFfmpegRunning(): Promise<boolean> {
+  const isWin = process.platform === "win32";
+  try {
+    if (isWin) {
+      const { stdout } = await execFileAsync("tasklist", [
+        "/FI", "IMAGENAME eq ffmpeg.exe", "/FO", "CSV", "/NH",
+      ]);
+      return stdout.includes("ffmpeg.exe");
+    } else {
+      const { stdout } = await execFileAsync("pgrep", ["-x", "ffmpeg"]);
+      return stdout.trim().length > 0;
+    }
+  } catch {
+    return false; // pgrep exit code 1 = no match
+  }
+}
+
+// ── Types ───────────────────────────────────────────────────────────────
 
 export interface SeriesInfo {
-  showId: string;      // IMDB ID
+  showId: string;
   showName: string;
   season: number;
   episode: number;
@@ -26,12 +98,15 @@ interface ActiveStream {
   isLive: boolean;
   headers?: Record<string, string>;
   reconnectCount: number;
-  // Playback tracking
   seekOffsetSec: number;
   contentTitle: string;
   audioStreamIndex?: number;
   sourceInfo?: StreamInfo;
   seriesInfo?: SeriesInfo;
+  streamEndPromise?: Promise<void>;
+  ffmpegCommand?: { kill: (signal: string) => void };
+  watchdogTimer?: ReturnType<typeof setInterval>;
+  lastFrameTime: number;
 }
 
 interface PausedState {
@@ -50,7 +125,7 @@ interface PausedState {
 let activeStream: ActiveStream | null = null;
 let pausedState: PausedState | null = null;
 
-// Simple async mutex to prevent concurrent stream starts
+// Simple async mutex
 let streamLock: Promise<void> = Promise.resolve();
 function acquireStreamLock(): { promise: Promise<void>; release: () => void } {
   let release: () => void;
@@ -64,17 +139,19 @@ function acquireStreamLock(): { promise: Promise<void>; release: () => void } {
 let autoplayEnabled = false;
 let autoplayCallback: (() => Promise<void>) | null = null;
 
-export function isStreaming(): boolean {
-  return activeStream !== null;
-}
+// Last known voice channel (set by every stream start, used by autoplay)
+let lastKnownGuildId: string | null = null;
+let lastKnownChannelId: string | null = null;
+
+// ── Public Getters ──────────────────────────────────────────────────────
+
+export function isStreaming(): boolean { return activeStream !== null; }
 
 export function getSeriesInfo(): SeriesInfo | null {
   return activeStream?.seriesInfo ?? pausedState?.seriesInfo ?? null;
 }
 
-export function isAutoplayEnabled(): boolean {
-  return autoplayEnabled;
-}
+export function isAutoplayEnabled(): boolean { return autoplayEnabled; }
 
 export function setAutoplay(enabled: boolean): void {
   autoplayEnabled = enabled;
@@ -85,13 +162,8 @@ export function setAutoplayCallback(cb: (() => Promise<void>) | null): void {
   autoplayCallback = cb;
 }
 
-export function isLiveStream(): boolean {
-  return activeStream?.isLive ?? false;
-}
+export function isLiveStream(): boolean { return activeStream?.isLive ?? false; }
 
-/**
- * Get current playback info (title + elapsed time).
- */
 export function getPlaybackInfo(): { title: string; elapsedSec: number; isLive: boolean } | null {
   if (!activeStream) return null;
   const wallElapsed = (Date.now() - activeStream.startedAt) / 1000;
@@ -102,68 +174,214 @@ export function getPlaybackInfo(): { title: string; elapsedSec: number; isLive: 
   };
 }
 
-/**
- * Get the paused state (if stream is paused).
- */
-export function getPausedState(): PausedState | null {
-  return pausedState;
+export function getPausedState(): PausedState | null { return pausedState; }
+export function clearPausedState(): void { pausedState = null; }
+
+export function getLastKnownVoiceChannel(): { guildId: string; channelId: string } | null {
+  if (lastKnownGuildId && lastKnownChannelId) {
+    return { guildId: lastKnownGuildId, channelId: lastKnownChannelId };
+  }
+  return null;
+}
+
+// ── Core: Unified Teardown ──────────────────────────────────────────────
+
+interface TeardownResult {
+  seriesInfo: SeriesInfo | null;
+  wasAutoplay: boolean;
+  cb: (() => Promise<void>) | null;
 }
 
 /**
- * Clear the paused state (called after play resumes).
+ * Tear down the current stream with VERIFIED FFmpeg kill.
+ * @param leaveVoice - true for /stop, /pause, autoplay end. false for /seek, /skip (preserves Go Live).
  */
-export function clearPausedState(): void {
-  pausedState = null;
-}
-
-/**
- * Pause the current stream: save elapsed time, stop playback.
- * Returns the elapsed time and title for display.
- */
-/**
- * Pause the current stream: save elapsed time, stop playback, leave voice.
- */
-export async function pauseStream(): Promise<{ elapsedSec: number; title: string }> {
-  if (!activeStream) throw new Error("No active stream to pause");
-  if (activeStream.isLive) throw new Error("Cannot pause a live stream");
-
-  const wallElapsed = (Date.now() - activeStream.startedAt) / 1000;
-  const elapsedSec = wallElapsed + activeStream.seekOffsetSec;
-  const title = activeStream.contentTitle;
-
-  // Save state for resume
-  pausedState = {
-    guildId: activeStream.guildId,
-    channelId: activeStream.channelId,
-    streamUrl: activeStream.streamUrl,
-    elapsedSec,
-    contentTitle: title,
-    audioStreamIndex: activeStream.audioStreamIndex,
-    subtitlePath: activeStream.subtitlePath,
-    sourceInfo: activeStream.sourceInfo,
-    headers: activeStream.headers,
-    seriesInfo: activeStream.seriesInfo,
+async function teardownStream(leaveVoice: boolean): Promise<TeardownResult> {
+  const result: TeardownResult = {
+    seriesInfo: activeStream?.seriesInfo ?? null,
+    wasAutoplay: autoplayEnabled,
+    cb: autoplayCallback,
   };
 
-  log.info(`Pausing "${title}" at ${elapsedSec.toFixed(1)}s`);
+  if (!activeStream) return result;
 
-  // Stop FFmpeg and leave voice
+  log.info(`teardownStream(leaveVoice=${leaveVoice}): starting`);
+
+  // 1. Clear watchdog FIRST to prevent it from racing
+  if (activeStream.watchdogTimer) {
+    clearInterval(activeStream.watchdogTimer);
+    activeStream.watchdogTimer = undefined;
+  }
+
+  // 2. Abort the signal (tells library to stop demuxer)
   activeStream.abortController.abort();
+  log.debug("teardownStream: abort controller signaled");
+
+  // 3. Stop sync monitor
   stopSyncMonitor();
+
+  // 4. Stop the library's stream sender (always — voice state gets corrupted by abort)
   const streamer = getStreamer();
   try { streamer.stopStream(); } catch { /* may already be stopped */ }
-  try { streamer.leaveVoice(); } catch { /* may already have left */ }
+
+  // 5. Kill FFmpeg and VERIFY it is dead (awaits with polling)
+  await killAllFfmpegAndVerify(activeStream.ffmpegCommand);
+
+  // 6. Wait for library promises to settle (hard 5s timeout)
+  const endPromise = activeStream.streamEndPromise;
+  if (endPromise) {
+    log.debug("teardownStream: waiting for settle promise (up to 5s)...");
+    await Promise.race([endPromise, new Promise<void>(r => setTimeout(r, 5000))]);
+    log.debug("teardownStream: settle promise resolved or timed out");
+  }
+
+  // 7. Final verification
+  const stillAlive = await isAnyFfmpegRunning();
+  if (stillAlive) {
+    log.error("CRITICAL: FFmpeg still alive after teardown, force killing...");
+    await killAllFfmpegOs();
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // 8. Clean up subtitle temp file (only if not paused)
+  const subPath = activeStream.subtitlePath;
+  if (subPath && !pausedState) {
+    rm(dirname(subPath), { recursive: true, force: true }).catch(() => {});
+  }
+
+  // 9. Null out active stream
   activeStream = null;
 
-  return { elapsedSec, title };
+  // 10. Always leave voice (library voice state corrupts after abort — must rejoin fresh)
+  try { streamer.leaveVoice(); } catch { /* already left */ }
+
+  log.info(`teardownStream: complete (leaveVoice=${leaveVoice})`);
+  return result;
 }
 
+// ── Core: Unified Stream End Handler ────────────────────────────────────
+
 /**
- * Start streaming to a voice channel.
- * @param sourceInfo - If provided, skips re-probing the URL (avoids double probe).
- * @param seekSeconds - If provided, seeks to this position via FFmpeg -ss.
- * @param contentTitle - Display title for /np command.
+ * Handle stream end from BOTH natural exit and watchdog.
+ * Acquires stream lock, runs full teardown, then triggers autoplay.
  */
+async function handleStreamEnd(reason: "natural" | "watchdog"): Promise<void> {
+  const { promise: waitForLock, release } = acquireStreamLock();
+  await waitForLock;
+
+  try {
+    if (!activeStream) {
+      log.debug(`handleStreamEnd(${reason}): no active stream, already cleaned up`);
+      return;
+    }
+
+    log.info(`Stream ended (${reason}), starting teardown`);
+    const { seriesInfo, wasAutoplay, cb } = await teardownStream(true);
+
+    // Trigger autoplay AFTER full verified teardown
+    if (wasAutoplay && cb && seriesInfo) {
+      log.info(`Autoplay: triggering next episode for ${seriesInfo.showName} S${seriesInfo.season}E${seriesInfo.episode}`);
+
+      // Small delay for OS to fully reap the process
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Verify AGAIN before spawning new FFmpeg
+      const zombieCheck = await isAnyFfmpegRunning();
+      if (zombieCheck) {
+        log.error("Autoplay: zombie FFmpeg detected, killing before autoplay...");
+        await killAllFfmpegAndVerify();
+      }
+
+      cb().catch((err) => log.error(`Autoplay failed: ${errStr(err)}`));
+    }
+  } finally {
+    release();
+  }
+}
+
+// ── Public: Pause ───────────────────────────────────────────────────────
+
+/**
+ * Pause the current stream. Saves elapsed time for resume.
+ * @param options.preserveVoice - true for seek/skip (keep Go Live), false for user /pause
+ */
+export async function pauseStream(
+  options?: { preserveVoice?: boolean }
+): Promise<{ elapsedSec: number; title: string }> {
+  const { promise: waitForLock, release } = acquireStreamLock();
+  await waitForLock;
+
+  try {
+    if (!activeStream) throw new Error("No active stream to pause");
+    if (activeStream.isLive) throw new Error("Cannot pause a live stream");
+
+    const wallElapsed = (Date.now() - activeStream.startedAt) / 1000;
+    const elapsedSec = wallElapsed + activeStream.seekOffsetSec;
+    const title = activeStream.contentTitle;
+
+    pausedState = {
+      guildId: activeStream.guildId,
+      channelId: activeStream.channelId,
+      streamUrl: activeStream.streamUrl,
+      elapsedSec,
+      contentTitle: title,
+      audioStreamIndex: activeStream.audioStreamIndex,
+      subtitlePath: activeStream.subtitlePath,
+      sourceInfo: activeStream.sourceInfo,
+      headers: activeStream.headers,
+      seriesInfo: activeStream.seriesInfo,
+    };
+
+    const preserveVoice = options?.preserveVoice ?? false;
+    log.info(`Pausing "${title}" at ${elapsedSec.toFixed(1)}s (preserveVoice=${preserveVoice})`);
+
+    await teardownStream(!preserveVoice);
+
+    return { elapsedSec, title };
+  } finally {
+    release();
+  }
+}
+
+// ── Public: Stop ────────────────────────────────────────────────────────
+
+export async function stopVideoStream(): Promise<void> {
+  const { promise: waitForLock, release } = acquireStreamLock();
+  await waitForLock;
+
+  try {
+    if (!activeStream && !pausedState) {
+      log.info("No active stream to stop");
+      return;
+    }
+
+    log.info("Stopping stream...");
+
+    if (activeStream) {
+      await teardownStream(true);
+    }
+
+    // Clear paused state and clean up subtitle temps
+    if (pausedState) {
+      if (pausedState.subtitlePath) {
+        rm(dirname(pausedState.subtitlePath), { recursive: true, force: true }).catch(() => {});
+      }
+      pausedState = null;
+      log.info("Cleared paused state");
+    }
+
+    // Disable autoplay on explicit stop
+    setAutoplay(false);
+    setAutoplayCallback(null);
+
+    log.info("Stream stopped");
+  } finally {
+    release();
+  }
+}
+
+// ── Public: Start ───────────────────────────────────────────────────────
+
 export async function startVideoStream(
   guildId: string,
   channelId: string,
@@ -203,41 +421,50 @@ async function startVideoStreamInner(
   contentTitle?: string,
   seriesInfo?: SeriesInfo,
 ): Promise<void> {
+  // Tear down any existing stream (preserve voice — we're about to rejoin anyway)
   if (activeStream) {
-    log.info("Stopping existing stream before starting new one");
-    await stopVideoStream();
+    log.info("Tearing down existing stream before starting new one");
+    await teardownStream(false);
+  }
+
+  // Pre-spawn safety: verify no stale FFmpeg
+  const stale = await isAnyFfmpegRunning();
+  if (stale) {
+    log.warn("Stale FFmpeg detected before prepareStream — killing");
+    await killAllFfmpegAndVerify();
   }
 
   const streamer = getStreamer();
 
-  // 1. Probe the source (skip if already probed by command handler)
+  // 1. Probe
   const sourceInfo = existingProbe ?? await (async () => {
     log.info("Probing source stream...");
     return probeStream(streamUrl, headers);
   })();
 
-  // 2. Build stream options (always transcode)
+  // 2. Build options
   const tuned = await autoTune();
   const options = buildStreamOptions(sourceInfo, tuned, audioStreamIndex, subtitlePath, headers, seekSeconds);
 
-  // 3. Join voice channel
+  // 3. Join voice channel (always rejoin — library voice state gets corrupted after abort)
   log.info(`Joining voice channel ${channelId} in guild ${guildId}`);
   await streamer.joinVoice(guildId, channelId);
 
-  // 4. Prepare FFmpeg stream
+  // 4. Track last known channel for autoplay
+  lastKnownGuildId = guildId;
+  lastKnownChannelId = channelId;
+
+  // 5. Prepare FFmpeg stream
   const abortController = new AbortController();
   log.info(`Preparing stream from: ${streamUrl.substring(0, 80)}...`);
-  const { command, output, promise } = prepareStream(
-    streamUrl,
-    options,
-    abortController.signal
-  );
+  const { command, output, promise } = prepareStream(streamUrl, options, abortController.signal);
 
+  const now = Date.now();
   activeStream = {
     guildId,
     channelId,
     abortController,
-    startedAt: Date.now(),
+    startedAt: now,
     streamUrl,
     subtitlePath,
     isLive,
@@ -248,9 +475,11 @@ async function startVideoStreamInner(
     audioStreamIndex,
     sourceInfo,
     seriesInfo,
+    ffmpegCommand: command as unknown as { kill: (signal: string) => void },
+    lastFrameTime: now,
   };
 
-  // 5. Monitor A/V sync via FFmpeg stderr
+  // 6. Sync monitor
   const ffmpegProcess = (command as unknown as { _currentProcess?: { stderr?: NodeJS.ReadableStream } })
     ._currentProcess;
   if (ffmpegProcess?.stderr) {
@@ -259,15 +488,16 @@ async function startVideoStreamInner(
     });
   }
 
-  // 6. Start Go Live playback
+  // 7. Start Go Live
   log.info("Starting Go Live stream");
-  const playPromise = playStream(output, streamer, {
-    type: "go-live",
-  }, abortController.signal);
+  const playPromise = playStream(output, streamer, { type: "go-live" }, abortController.signal);
 
-  // Handle stream end (with .catch to prevent unhandled rejection)
-  Promise.allSettled([promise, playPromise]).then(([encodeResult, playResult]) => {
-    if (abortController.signal.aborted) return;
+  // 8. Stream end handler — delegates to unified handleStreamEnd
+  const settlePromise = Promise.allSettled([promise, playPromise]).then(async ([encodeResult, playResult]) => {
+    if (abortController.signal.aborted) {
+      log.debug("Stream-end handler: aborted externally, skipping");
+      return;
+    }
 
     if (encodeResult.status === "rejected") {
       log.error(`FFmpeg error: ${errStr(encodeResult.reason)}`);
@@ -276,63 +506,38 @@ async function startVideoStreamInner(
       log.error(`Playback error: ${errStr(playResult.reason)}`);
     }
 
-    log.info("Stream ended naturally");
-
-    // Trigger autoplay if enabled and this was a series
-    const cb = autoplayCallback;
-    const series = activeStream?.seriesInfo;
-    cleanup();
-
-    if (autoplayEnabled && cb && series) {
-      log.info(`Autoplay: triggering next episode for ${series.showName} S${series.season}E${series.episode}`);
-      cb().catch((err) => log.error(`Autoplay failed: ${errStr(err)}`));
-    }
+    await handleStreamEnd("natural");
   }).catch((err) => {
     log.error(`Stream end handler error: ${errStr(err)}`);
   });
 
-  log.info("Stream started successfully");
-}
-
-/** Idempotent cleanup — safe to call multiple times. */
-function cleanup(): void {
-  if (!activeStream) return; // Already cleaned up
-
-  // Clean up subtitle temp file (only if NOT paused — paused needs it for resume)
-  const subPath = activeStream.subtitlePath;
-  if (subPath && !pausedState) {
-    rm(dirname(subPath), { recursive: true, force: true }).catch(() => {});
-  }
-
-  activeStream = null;
-  stopSyncMonitor();
-
-  const streamer = getStreamer();
-  try { streamer.stopStream(); } catch { /* may already be stopped */ }
-  try { streamer.leaveVoice(); } catch { /* may already have left */ }
-}
-
-export async function stopVideoStream(): Promise<void> {
-  if (!activeStream && !pausedState) {
-    log.info("No active stream to stop");
-    return;
-  }
-
-  log.info("Stopping stream...");
+  // 9. Watchdog: if no frames for 15s, force end
+  const watchdogInterval = setInterval(() => {
+    if (!activeStream || activeStream.abortController !== abortController) {
+      clearInterval(watchdogInterval);
+      return;
+    }
+    const silentMs = Date.now() - activeStream.lastFrameTime;
+    if (silentMs > 15_000 && activeStream.lastFrameTime !== activeStream.startedAt) {
+      log.info(`Watchdog: no frames for ${(silentMs / 1000).toFixed(0)}s — stream appears ended`);
+      clearInterval(watchdogInterval);
+      handleStreamEnd("watchdog").catch(err => log.error(`Watchdog handler error: ${errStr(err)}`));
+    }
+  }, 5_000);
 
   if (activeStream) {
-    activeStream.abortController.abort();
-    cleanup();
+    activeStream.watchdogTimer = watchdogInterval;
   }
 
-  // Clear paused state and clean up its subtitle temp files
-  if (pausedState) {
-    if (pausedState.subtitlePath) {
-      rm(dirname(pausedState.subtitlePath), { recursive: true, force: true }).catch(() => {});
-    }
-    pausedState = null;
-    log.info("Cleared paused state");
+  // 10. Update lastFrameTime on output data
+  output.on("data", () => {
+    if (activeStream) activeStream.lastFrameTime = Date.now();
+  });
+
+  // 11. Store settle promise
+  if (activeStream) {
+    activeStream.streamEndPromise = settlePromise;
   }
 
-  log.info("Stream stopped");
+  log.info("Stream started successfully");
 }
