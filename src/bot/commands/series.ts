@@ -3,9 +3,10 @@ import { searchContent, resolveEpisode } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
-import { startVideoStream } from "../../streamer/stream.js";
+import { startVideoStream, isAutoplayEnabled } from "../../streamer/stream.js";
 import { pickStream } from "./picker.js";
 import { pickAudioTrack, pickSubtitleTrack } from "./options.js";
+import { setLastKnownChannel } from "./playback.js";
 import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("SeriesCmd");
@@ -106,7 +107,13 @@ export async function handleSeries(
   });
 
   try {
-    await startVideoStream(guildId, channelId, selected.stream.url, audioStreamIndex, subtitlePath, sourceInfo, undefined, false, undefined, contentLabel);
+    setLastKnownChannel(guildId, channelId);
+    await startVideoStream(guildId, channelId, selected.stream.url, audioStreamIndex, subtitlePath, sourceInfo, undefined, false, undefined, contentLabel, {
+      showId: show.id,
+      showName: show.name,
+      season: episode.season,
+      episode: episode.episode,
+    });
     await interaction.editReply({
       content: `Now streaming: **${show.name}** ${episodeLabel} - ${episode.name}`,
       components: [],

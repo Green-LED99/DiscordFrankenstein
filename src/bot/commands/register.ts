@@ -110,6 +110,14 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
     description: "Show what's currently playing and the timestamp",
   },
   {
+    name: "next",
+    description: "Play the next episode in the series",
+  },
+  {
+    name: "autoplay",
+    description: "Toggle auto-play next episode when current one ends",
+  },
+  {
     name: "stop",
     description: "Stop the current stream",
   },

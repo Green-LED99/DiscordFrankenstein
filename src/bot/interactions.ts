@@ -9,6 +9,8 @@ import {
   handleSkip,
   handleSeek,
   handleNowPlaying,
+  handleNext,
+  handleAutoplay,
 } from "./commands/playback.js";
 import { createLogger, errStr } from "../utils/logger.js";
 
@@ -51,6 +53,12 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         break;
       case "np":
         await handleNowPlaying(interaction);
+        break;
+      case "next":
+        await handleNext(interaction);
+        break;
+      case "autoplay":
+        await handleAutoplay(interaction);
         break;
       case "stop":
         await handleStop(interaction);

@@ -9,7 +9,14 @@ import {
   pauseStream,
   stopVideoStream,
   startVideoStream,
+  getSeriesInfo,
+  isAutoplayEnabled,
+  setAutoplay,
+  setAutoplayCallback,
+  type SeriesInfo,
 } from "../../streamer/stream.js";
+import { getNextEpisode } from "../../services/cinemeta.js";
+import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { offsetSubtitleFile } from "../../services/opensubtitles.js";
 import { createLogger, errStr } from "../../utils/logger.js";
 
@@ -300,4 +307,228 @@ export async function handleNowPlaying(
   }
 
   await interaction.editReply("Nothing is currently playing.");
+}
+
+// ── /next (Next Episode) ───────────────────────────────────────────────
+
+export async function handleNext(
+  interaction: ChatInputCommandInteraction
+): Promise<void> {
+  const series = getSeriesInfo();
+  if (!series) {
+    await interaction.editReply("No series is currently playing. Use /series first.");
+    return;
+  }
+
+  await interaction.editReply(
+    `⏭️ Finding next episode after **${series.showName}** S${String(series.season).padStart(2, "0")}E${String(series.episode).padStart(2, "0")}...`
+  );
+
+  try {
+    await playNextEpisode(series, interaction);
+  } catch (err) {
+    log.error(`Next episode failed: ${errStr(err)}`);
+    await interaction.editReply(
+      `Failed to play next episode: ${err instanceof Error ? err.message : "Unknown error"}`
+    );
+  }
+}
+
+// ── /autoplay ──────────────────────────────────────────────────────────
+
+export async function handleAutoplay(
+  interaction: ChatInputCommandInteraction
+): Promise<void> {
+  const newState = !isAutoplayEnabled();
+  setAutoplay(newState);
+
+  if (newState) {
+    const series = getSeriesInfo();
+    if (series) {
+      // Register the autoplay callback
+      registerAutoplayCallback(series);
+      await interaction.editReply(
+        `🔁 Autoplay **enabled** for **${series.showName}**. Next episodes will play automatically.`
+      );
+    } else {
+      await interaction.editReply(
+        `🔁 Autoplay **enabled**. Start a series with /series to auto-play episodes.`
+      );
+    }
+  } else {
+    setAutoplayCallback(null);
+    await interaction.editReply("⏹️ Autoplay **disabled**.");
+  }
+
+  log.info(`Autoplay ${newState ? "enabled" : "disabled"}`);
+}
+
+// ── Shared: play next episode logic ────────────────────────────────────
+
+async function playNextEpisode(
+  series: SeriesInfo,
+  interaction?: ChatInputCommandInteraction
+): Promise<void> {
+  const nextEp = await getNextEpisode(series.showId, series.season, series.episode);
+  if (!nextEp) {
+    const msg = `No more episodes after S${String(series.season).padStart(2, "0")}E${String(series.episode).padStart(2, "0")} of **${series.showName}**.`;
+    if (interaction) await interaction.editReply(msg);
+    else log.info(msg);
+    setAutoplay(false);
+    return;
+  }
+
+  const episodeLabel = `S${String(nextEp.season).padStart(2, "0")}E${String(nextEp.episode).padStart(2, "0")}`;
+  const contentLabel = `${series.showName} ${episodeLabel} - ${nextEp.name}`;
+  log.info(`Next episode: ${contentLabel}`);
+
+  // Fetch streams
+  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode);
+  const topStreams = getTopStreams(streams);
+
+  if (topStreams.length === 0) {
+    const msg = `No streams found for **${contentLabel}**.`;
+    if (interaction) await interaction.editReply(msg);
+    else log.info(msg);
+    setAutoplay(false);
+    return;
+  }
+
+  // Auto-select first stream
+  const selected = topStreams[0];
+  log.info(`Auto-selected: ${selected.label}`);
+
+  // Stop current stream if running
+  if (isStreaming()) {
+    await stopVideoStream();
+    await sleep(1000);
+  }
+
+  // Get guild/channel from current stream or paused state
+  const playback = getPlaybackInfo();
+  const paused = getPausedState();
+  const guildId = playback ? undefined : paused?.guildId;
+  const channelId = playback ? undefined : paused?.channelId;
+
+  // We need guild and channel — get from interaction if available
+  if (interaction) {
+    const member = interaction.member;
+    if (!member || !("voice" in member)) {
+      await interaction.editReply("Could not determine your voice channel.");
+      return;
+    }
+    const memberGuildId = interaction.guildId;
+    const memberChannelId = (member as { voice: { channelId: string | null } }).voice.channelId;
+    if (!memberGuildId || !memberChannelId) {
+      await interaction.editReply("You must be in a voice channel.");
+      return;
+    }
+
+    if (interaction) {
+      await interaction.editReply(`⏭️ Now playing: **${contentLabel}**`);
+    }
+
+    const newSeriesInfo: SeriesInfo = {
+      showId: series.showId,
+      showName: series.showName,
+      season: nextEp.season,
+      episode: nextEp.episode,
+    };
+
+    await startVideoStream(
+      memberGuildId,
+      memberChannelId,
+      selected.stream.url,
+      undefined, undefined, undefined, undefined,
+      false, undefined, contentLabel, newSeriesInfo
+    );
+
+    // Re-register autoplay callback for the new episode
+    if (isAutoplayEnabled()) {
+      registerAutoplayCallback(newSeriesInfo);
+    }
+    return;
+  }
+
+  // Autoplay path (no interaction) — use last known guild/channel
+  log.info(`Autoplay: starting ${contentLabel}`);
+  // We need to get guild/channel from somewhere — use the series info context
+  // Since cleanup already happened, we'll rely on the autoplay having saved this
+}
+
+function registerAutoplayCallback(series: SeriesInfo): void {
+  setAutoplayCallback(async () => {
+    try {
+      await playNextEpisodeAutoplay(series);
+    } catch (err) {
+      log.error(`Autoplay callback failed: ${errStr(err)}`);
+      setAutoplay(false);
+    }
+  });
+}
+
+async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
+  const nextEp = await getNextEpisode(series.showId, series.season, series.episode);
+  if (!nextEp) {
+    log.info(`Autoplay: no more episodes after S${series.season}E${series.episode}`);
+    setAutoplay(false);
+    return;
+  }
+
+  const episodeLabel = `S${String(nextEp.season).padStart(2, "0")}E${String(nextEp.episode).padStart(2, "0")}`;
+  const contentLabel = `${series.showName} ${episodeLabel} - ${nextEp.name}`;
+  log.info(`Autoplay: fetching streams for ${contentLabel}`);
+
+  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode);
+  const topStreams = getTopStreams(streams);
+
+  if (topStreams.length === 0) {
+    log.warn(`Autoplay: no streams for ${contentLabel}`);
+    setAutoplay(false);
+    return;
+  }
+
+  const selected = topStreams[0];
+  log.info(`Autoplay: selected ${selected.label}`);
+
+  // Wait for cleanup to finish
+  await sleep(2000);
+
+  const newSeriesInfo: SeriesInfo = {
+    showId: series.showId,
+    showName: series.showName,
+    season: nextEp.season,
+    episode: nextEp.episode,
+  };
+
+  // We need guild/channel — store them in a module-level variable
+  const { guildId, channelId } = getLastKnownChannel();
+
+  if (!guildId || !channelId) {
+    log.error("Autoplay: no guild/channel available");
+    setAutoplay(false);
+    return;
+  }
+
+  await startVideoStream(
+    guildId, channelId, selected.stream.url,
+    undefined, undefined, undefined, undefined,
+    false, undefined, contentLabel, newSeriesInfo
+  );
+
+  // Re-register for the next episode
+  registerAutoplayCallback(newSeriesInfo);
+}
+
+// Store last known guild/channel for autoplay (set when any stream starts)
+let lastGuildId: string | null = null;
+let lastChannelId: string | null = null;
+
+export function setLastKnownChannel(guildId: string, channelId: string): void {
+  lastGuildId = guildId;
+  lastChannelId = channelId;
+}
+
+function getLastKnownChannel(): { guildId: string | null; channelId: string | null } {
+  return { guildId: lastGuildId, channelId: lastChannelId };
 }

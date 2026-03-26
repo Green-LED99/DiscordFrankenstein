@@ -9,6 +9,13 @@ import { createLogger, errStr } from "../utils/logger.js";
 
 const log = createLogger("Stream");
 
+export interface SeriesInfo {
+  showId: string;      // IMDB ID
+  showName: string;
+  season: number;
+  episode: number;
+}
+
 interface ActiveStream {
   guildId: string;
   channelId: string;
@@ -24,6 +31,7 @@ interface ActiveStream {
   contentTitle: string;
   audioStreamIndex?: number;
   sourceInfo?: StreamInfo;
+  seriesInfo?: SeriesInfo;
 }
 
 interface PausedState {
@@ -36,6 +44,7 @@ interface PausedState {
   subtitlePath?: string;
   sourceInfo?: StreamInfo;
   headers?: Record<string, string>;
+  seriesInfo?: SeriesInfo;
 }
 
 let activeStream: ActiveStream | null = null;
@@ -51,8 +60,29 @@ function acquireStreamLock(): { promise: Promise<void>; release: () => void } {
   return { promise: acquired, release: release! };
 }
 
+// Autoplay state
+let autoplayEnabled = false;
+let autoplayCallback: (() => Promise<void>) | null = null;
+
 export function isStreaming(): boolean {
   return activeStream !== null;
+}
+
+export function getSeriesInfo(): SeriesInfo | null {
+  return activeStream?.seriesInfo ?? pausedState?.seriesInfo ?? null;
+}
+
+export function isAutoplayEnabled(): boolean {
+  return autoplayEnabled;
+}
+
+export function setAutoplay(enabled: boolean): void {
+  autoplayEnabled = enabled;
+  if (!enabled) autoplayCallback = null;
+}
+
+export function setAutoplayCallback(cb: (() => Promise<void>) | null): void {
+  autoplayCallback = cb;
 }
 
 export function isLiveStream(): boolean {
@@ -112,6 +142,7 @@ export async function pauseStream(): Promise<{ elapsedSec: number; title: string
     subtitlePath: activeStream.subtitlePath,
     sourceInfo: activeStream.sourceInfo,
     headers: activeStream.headers,
+    seriesInfo: activeStream.seriesInfo,
   };
 
   log.info(`Pausing "${title}" at ${elapsedSec.toFixed(1)}s`);
@@ -144,6 +175,7 @@ export async function startVideoStream(
   isLive = false,
   seekSeconds?: number,
   contentTitle?: string,
+  seriesInfo?: SeriesInfo,
 ): Promise<void> {
   const { promise: waitForLock, release } = acquireStreamLock();
   await waitForLock;
@@ -151,7 +183,7 @@ export async function startVideoStream(
   try {
     await startVideoStreamInner(
       guildId, channelId, streamUrl, audioStreamIndex, subtitlePath,
-      sourceInfo, headers, isLive, seekSeconds, contentTitle
+      sourceInfo, headers, isLive, seekSeconds, contentTitle, seriesInfo
     );
   } finally {
     release();
@@ -169,6 +201,7 @@ async function startVideoStreamInner(
   isLive = false,
   seekSeconds?: number,
   contentTitle?: string,
+  seriesInfo?: SeriesInfo,
 ): Promise<void> {
   if (activeStream) {
     log.info("Stopping existing stream before starting new one");
@@ -214,6 +247,7 @@ async function startVideoStreamInner(
     contentTitle: contentTitle ?? "Unknown",
     audioStreamIndex,
     sourceInfo,
+    seriesInfo,
   };
 
   // 5. Monitor A/V sync via FFmpeg stderr
@@ -243,7 +277,16 @@ async function startVideoStreamInner(
     }
 
     log.info("Stream ended naturally");
+
+    // Trigger autoplay if enabled and this was a series
+    const cb = autoplayCallback;
+    const series = activeStream?.seriesInfo;
     cleanup();
+
+    if (autoplayEnabled && cb && series) {
+      log.info(`Autoplay: triggering next episode for ${series.showName} S${series.season}E${series.episode}`);
+      cb().catch((err) => log.error(`Autoplay failed: ${errStr(err)}`));
+    }
   }).catch((err) => {
     log.error(`Stream end handler error: ${errStr(err)}`);
   });

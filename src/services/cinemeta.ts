@@ -134,3 +134,51 @@ export async function resolveEpisode(
   log.info(`Random pick: S${pick.season}E${pick.episode} - ${pick.name}`);
   return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown" };
 }
+
+/**
+ * Get the next episode after the given season/episode.
+ * Tries: same season next episode, then first episode of next season.
+ * Returns null if no next episode exists.
+ */
+export async function getNextEpisode(
+  imdbId: string,
+  currentSeason: number,
+  currentEpisode: number
+): Promise<EpisodeInfo | null> {
+  const data = await cinemetaFetch<CinemetaMetaResponse>(
+    `/meta/series/${imdbId}.json`
+  );
+
+  const videos = data.meta.videos ?? [];
+  const regularEpisodes = videos.filter((v) => v.season > 0);
+
+  // Try next episode in same season
+  const nextInSeason = regularEpisodes.find(
+    (v) => v.season === currentSeason && v.episode === currentEpisode + 1
+  );
+  if (nextInSeason) {
+    log.info(`Next episode: S${nextInSeason.season}E${nextInSeason.episode} - ${nextInSeason.name}`);
+    return {
+      season: nextInSeason.season,
+      episode: nextInSeason.episode,
+      name: nextInSeason.name ?? "Unknown",
+    };
+  }
+
+  // Try first episode of next season
+  const nextSeasonEps = regularEpisodes
+    .filter((v) => v.season === currentSeason + 1)
+    .sort((a, b) => a.episode - b.episode);
+  if (nextSeasonEps.length > 0) {
+    const first = nextSeasonEps[0];
+    log.info(`Next episode (new season): S${first.season}E${first.episode} - ${first.name}`);
+    return {
+      season: first.season,
+      episode: first.episode,
+      name: first.name ?? "Unknown",
+    };
+  }
+
+  log.info(`No next episode after S${currentSeason}E${currentEpisode}`);
+  return null;
+}
