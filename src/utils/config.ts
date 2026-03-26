@@ -42,12 +42,11 @@ function parseHwAccel(): HardwareAccel {
 export const config = {
   botToken: requireEnv("BOT_TOKEN"),
   userToken: requireEnv("USER_TOKEN"),
-  tmdbApiKey: requireEnv("TMDB_API_KEY"),
   stremioAddonUrl: requireEnv("STREMIO_ADDON_URL"),
 
   // Streaming settings with validation
   maxResolution: parseIntEnv("MAX_RESOLUTION", 720),
   maxFps: parseIntEnv("MAX_FPS", 30),
-  videoBitrate: parseIntEnv("VIDEO_BITRATE", 2500),
+  videoBitrate: parseIntEnv("VIDEO_BITRATE", 1500),
   hardwareAccel: parseHwAccel(),
 } as const;

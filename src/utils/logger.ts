@@ -40,3 +40,9 @@ export function createLogger(component: string) {
     error: (msg: string) => log("ERROR", component, msg),
   };
 }
+
+/** Format an error for logging, preserving stack trace */
+export function errStr(err: unknown): string {
+  if (err instanceof Error) return err.stack ?? err.message;
+  return String(err);
+}

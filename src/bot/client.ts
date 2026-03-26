@@ -17,6 +17,7 @@ export async function initBotClient(): Promise<void> {
   });
 
   botClient.on("interactionCreate", handleInteraction);
+  botClient.on("error", (err: Error) => log.error(`Discord client error: ${err.stack ?? err.message}`));
 
   botClient.once("ready", async (client) => {
     log.info(`Bot logged in as ${client.user.tag}`);

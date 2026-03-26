@@ -9,7 +9,6 @@
         "SettingMappings": {
           "BOT_TOKEN": "BotToken",
           "USER_TOKEN": "UserToken",
-          "TMDB_API_KEY": "TmdbApiKey",
           "STREMIO_ADDON_URL": "StremioAddonUrl",
           "MAX_RESOLUTION": "MaxResolution",
           "MAX_FPS": "MaxFps",

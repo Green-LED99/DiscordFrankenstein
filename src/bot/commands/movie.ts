@@ -1,9 +1,12 @@
 import type { ChatInputCommandInteraction, GuildMember } from "discord.js";
-import { searchMovie, getExternalIds } from "../../services/tmdb.js";
+import { searchContent } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
+import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
+import { probeStream } from "../../services/ffprobe.js";
 import { startVideoStream } from "../../streamer/stream.js";
 import { pickStream } from "./picker.js";
-import { createLogger } from "../../utils/logger.js";
+import { pickAudioTrack, pickSubtitleTrack } from "./options.js";
+import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("MovieCmd");
 
@@ -11,68 +14,98 @@ export async function handleMovie(
   interaction: ChatInputCommandInteraction
 ): Promise<void> {
   const title = interaction.options.getString("title", true);
-  const member = interaction.member as GuildMember;
+  const member = interaction.member;
 
-  // Check if user is in a voice channel
-  if (!member.voice.channelId) {
+  if (!member || !("voice" in member)) {
+    await interaction.editReply("Could not determine your voice channel.");
+    return;
+  }
+
+  if (!(member as GuildMember).voice.channelId) {
     await interaction.editReply("You must be in a voice channel to use this command.");
     return;
   }
 
-  const guildId = interaction.guildId!;
-  const channelId = member.voice.channelId;
+  const guildId = interaction.guildId;
+  if (!guildId) {
+    await interaction.editReply("This command can only be used in a server.");
+    return;
+  }
 
-  // 1. Search TMDB
+  const channelId = (member as GuildMember).voice.channelId!;
+
+  // 1. Search Cinemeta
   await interaction.editReply(`Searching for "${title}"...`);
-  const results = await searchMovie(title);
+  const results = await searchContent(title, "movie");
   if (results.length === 0) {
     await interaction.editReply(`No movies found for "${title}".`);
     return;
   }
 
   const movie = results[0];
-  const year = movie.release_date?.substring(0, 4) ?? "Unknown";
-  log.info(`Found: ${movie.title} (${year}) [TMDB: ${movie.id}]`);
+  const year = movie.releaseInfo ?? movie.year ?? "Unknown";
+  log.info(`Found: ${movie.name} (${year}) [IMDB: ${movie.id}]`);
 
-  // 2. Get IMDB ID
-  const imdbId = await getExternalIds(movie.id, "movie");
-
-  // 3. Fetch streams from Torrentio
+  // 2. Fetch streams from Torrentio
   await interaction.editReply(
-    `Found **${movie.title}** (${year}). Fetching streams...`
+    `Found **${movie.name}** (${year}). Fetching streams...`
   );
-  const streams = await fetchStreams("movie", imdbId);
+  const streams = await fetchStreams("movie", movie.id);
   const topStreams = getTopStreams(streams);
 
   if (topStreams.length === 0) {
     await interaction.editReply(
-      `No suitable streams found for **${movie.title}** (${year}).`
+      `No suitable streams found for **${movie.name}** (${year}).`
     );
     return;
   }
 
-  // 4. Let user pick a stream
-  const contentLabel = `${movie.title} (${year})`;
+  // 3. Let user pick a stream
+  const contentLabel = `${movie.name} (${year})`;
   const selected = await pickStream(interaction, topStreams, contentLabel);
+  if (!selected) return;
 
-  if (!selected) {
-    return; // Timed out or cancelled
+  // 4. Probe the selected stream for audio tracks
+  await interaction.editReply({
+    content: `Analyzing **${contentLabel}**...`,
+    components: [],
+  });
+
+  let audioStreamIndex: number | undefined;
+  let subtitlePath: string | undefined;
+  let sourceInfo;
+
+  try {
+    sourceInfo = await probeStream(selected.stream.url);
+
+    // 5. Audio track selection (only if multiple audio streams)
+    const audioIdx = await pickAudioTrack(interaction, sourceInfo.audioStreams);
+    if (audioIdx !== null) audioStreamIndex = audioIdx;
+
+    // 6. Subtitle selection from OpenSubtitles
+    const subtitles = await fetchSubtitles("movie", movie.id);
+    const selectedSub = await pickSubtitleTrack(interaction, subtitles);
+    if (selectedSub) {
+      subtitlePath = await downloadSubtitle(selectedSub);
+    }
+  } catch (err) {
+    log.warn(`Audio/subtitle selection failed, continuing without: ${errStr(err)}`);
   }
 
-  // 5. Start streaming
+  // 7. Start streaming (pass sourceInfo to avoid re-probing)
   await interaction.editReply({
     content: `Preparing to stream **${contentLabel}**...`,
     components: [],
   });
 
   try {
-    await startVideoStream(guildId, channelId, selected.stream.url);
+    await startVideoStream(guildId, channelId, selected.stream.url, audioStreamIndex, subtitlePath, sourceInfo, undefined, false, undefined, contentLabel);
     await interaction.editReply({
-      content: `Now streaming: **${contentLabel}** - ${selected.stream.name}`,
+      content: `Now streaming: **${contentLabel}**`,
       components: [],
     });
   } catch (err) {
-    log.error(`Stream start failed: ${err}`);
+    log.error(`Stream start failed: ${errStr(err)}`);
     await interaction.editReply({
       content: `Failed to start stream for **${contentLabel}**: ${err instanceof Error ? err.message : "Unknown error"}`,
       components: [],

@@ -18,15 +18,6 @@
     "Placeholder": "MTI4..."
   },
   {
-    "DisplayName": "TMDB API Key",
-    "Description": "API key from The Movie Database (themoviedb.org)",
-    "FieldName": "TmdbApiKey",
-    "InputType": "password",
-    "Category": "Authentication",
-    "Required": true,
-    "Placeholder": "a9ee6dc..."
-  },
-  {
     "DisplayName": "Stremio Addon URL",
     "Description": "Full Torrentio addon URL with RealDebrid configuration",
     "FieldName": "StremioAddonUrl",

@@ -70,11 +70,11 @@ async function runBenchmark(
   ];
 
   if (hwAccel === "nvidia") {
-    args.push("-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll");
+    args.push("-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq");
   } else if (hwAccel === "vaapi") {
     args.push("-c:v", "h264_vaapi");
   } else {
-    args.push("-c:v", "libx264", "-preset", preset, "-tune", "zerolatency");
+    args.push("-c:v", "libx264", "-preset", preset);
   }
 
   args.push(
@@ -121,7 +121,7 @@ export async function autoTune(): Promise<TunedSettings> {
     height: config.maxResolution,
     fps: config.maxFps,
     bitrate: config.videoBitrate,
-    bitrateMax: Math.round(config.videoBitrate * 1.4),
+    bitrateMax: Math.round(config.videoBitrate * 1.5),
     preset: "ultrafast",
     hwAccel,
   };
@@ -188,76 +188,45 @@ export async function autoTune(): Promise<TunedSettings> {
   return bestSettings;
 }
 
+// Map x264 presets to NVENC presets (quality-matched)
+const NVENC_PRESET_MAP: Record<X264Preset, "p1" | "p2" | "p3" | "p4" | "p5" | "p6" | "p7"> = {
+  ultrafast: "p1",
+  superfast: "p2",
+  veryfast: "p3",
+  faster: "p3",
+  fast: "p4",
+  medium: "p4",
+  slow: "p5",
+};
+
 export function getEncoderSettings(tuned: TunedSettings): EncoderSettingsGetter {
   if (tuned.hwAccel === "nvidia") {
-    return Encoders.nvenc();
+    const nvPreset = NVENC_PRESET_MAP[tuned.preset] ?? "p4";
+    log.info(`NVENC encoder: preset ${nvPreset} (from x264 "${tuned.preset}")`);
+    return Encoders.nvenc({ preset: nvPreset });
   }
   if (tuned.hwAccel === "vaapi") {
     return Encoders.vaapi();
   }
+  // Use autoTune's chosen preset — it benchmarked this machine and picked
+  // the highest quality preset that runs at >=2x realtime.
+  // Do NOT add tune: "zerolatency" — causes frame freezing (upstream Issue #39).
+  log.info(`Software encoder: x264 preset "${tuned.preset}"`);
   return Encoders.software({
-    x264: { preset: tuned.preset, tune: "zerolatency" },
-    x265: { preset: tuned.preset, tune: "zerolatency" },
+    x264: { preset: tuned.preset },
+    x265: { preset: tuned.preset },
   });
 }
 
-// Input options applied BEFORE -i for HTTP source handling.
-// Matches WrappedStream's proven configuration.
-// -fflags +nobuffer+genpts+discardcorrupt: low-latency, generate PTS, drop corrupt
-// -flags low_delay: minimize codec-level buffering
-// -thread_queue_size 4096: prevent "Thread message queue blocking" on HTTP input
-// -analyzeduration / -probesize: longer analysis for HTTP/RealDebrid sources
-const SYNC_INPUT_OPTIONS: string[] = [
-  "-fflags", "+nobuffer+genpts+discardcorrupt",
-  "-flags", "low_delay",
-  "-thread_queue_size", "4096",
-  "-analyzeduration", "10000000",
-  "-probesize", "10000000",
-];
-
-// Output options for NUT muxer.
-// -avoid_negative_ts make_zero: normalize negative timestamps
-// Keep minimal — the library handles A/V sync via PTS-based pacing.
-const SYNC_OUTPUT_OPTIONS: string[] = [
-  "-avoid_negative_ts", "make_zero",
-];
 
 export function buildStreamOptions(
   sourceInfo: StreamInfo,
   tuned: TunedSettings,
-  copyMode: boolean
+  audioStreamIndex?: number,
+  subtitlePath?: string,
+  headers?: Record<string, string>,
+  seekSeconds?: number,
 ): Partial<PrepareStreamOptions> {
-  if (copyMode) {
-    // noTranscoding only affects video (copies H264 as-is).
-    // The library always transcodes audio to libopus regardless.
-    // -bsf:v h264_mp4toannexb overrides the NUT muxer's auto-inserted
-    // h264_metadata BSF which crashes on many Torrentio streams with
-    // "Invalid NAL unit size" errors. h264_mp4toannexb only does Annex-B
-    // conversion without parsing NAL metadata.
-    log.info(
-      `Using copy mode (video passthrough H264, audio -> opus from ${sourceInfo.audioCodec})`
-    );
-    return {
-      noTranscoding: true,
-      width: sourceInfo.width,
-      height: sourceInfo.height,
-      frameRate: sourceInfo.fps,
-      videoCodec: "H264",
-      includeAudio: true,
-      bitrateAudio: 128,
-      bitrateVideo: 0,
-      bitrateVideoMax: 0,
-      hardwareAcceleratedDecoding: false,
-      minimizeLatency: false,
-      encoder: Encoders.software(),
-      customInputOptions: SYNC_INPUT_OPTIONS,
-      customFfmpegFlags: [
-        ...SYNC_OUTPUT_OPTIONS,
-        "-bsf:v", "h264_mp4toannexb",
-      ],
-    };
-  }
-
   // Use source framerate if within limits, avoiding 24→30 judder from 3:2 pulldown.
   // Only upscale fps if source is below a minimum threshold.
   const outputFps = Math.min(sourceInfo.fps > 0 ? sourceInfo.fps : tuned.fps, tuned.fps);
@@ -266,6 +235,38 @@ export function buildStreamOptions(
     `Transcoding to ${tuned.width}x${tuned.height}@${outputFps}fps ` +
       `(${tuned.preset}, ${tuned.hwAccel}, ${tuned.bitrate}kbps)`
   );
+
+  // Build custom FFmpeg flags
+  const customFfmpegFlags: string[] = [
+    "-max_delay", "0",
+    "-flush_packets", "1",
+    "-bufsize:v", `${tuned.bitrate}k`,
+    "-profile:v", "baseline",
+    "-level:v", "3.1",
+    "-af", "aresample=async=4:first_pts=0,volume@internal_lib=1.0",
+  ];
+
+  // Audio + subtitle support is handled by the patched library (newApi.js).
+  // We pass subtitlePath and audioStreamIndex as extra options that the
+  // patched prepareStream reads directly.
+  if (audioStreamIndex !== undefined) {
+    log.info(`Audio stream index: ${audioStreamIndex}`);
+  }
+  if (subtitlePath) {
+    log.info(`Burning subtitles from: ${subtitlePath}`);
+  }
+
+  // The patched library reads subtitlePath and audioStreamIndex from options
+  const extraOptions: Record<string, unknown> = {};
+  if (subtitlePath) extraOptions.subtitlePath = subtitlePath;
+  if (audioStreamIndex !== undefined) extraOptions.audioStreamIndex = audioStreamIndex;
+
+  // Seek support: -ss before -i = fast keyframe seek
+  const customInputOptions: string[] = [];
+  if (seekSeconds !== undefined && seekSeconds > 0) {
+    customInputOptions.push("-ss", seekSeconds.toFixed(3));
+    log.info(`Seeking to ${seekSeconds.toFixed(1)}s`);
+  }
 
   return {
     noTranscoding: false,
@@ -278,30 +279,10 @@ export function buildStreamOptions(
     bitrateAudio: 128,
     includeAudio: true,
     hardwareAcceleratedDecoding: tuned.hwAccel !== "none",
-    minimizeLatency: false,
     encoder: getEncoderSettings(tuned),
-    customInputOptions: SYNC_INPUT_OPTIONS,
-    customFfmpegFlags: [
-      // A/V sync: constant frame rate, no frame drops
-      "-fps_mode", "cfr",
-      // Keyframe every 1 second (matching library's force_key_frames)
-      "-g", `${outputFps}`,
-      "-keyint_min", `${outputFps}`,
-      // Encoder-specific flags
-      ...(tuned.hwAccel === "nvidia"
-        ? [
-            // NVENC: no lookahead, no encoder delay, no B-frames, force IDR
-            // -bf 0 is critical: B-frames cause PTS!=DTS which breaks DAVE
-            // -no-scenecut disables scene-change IDR (NVENC-specific flag)
-            "-rc-lookahead", "0", "-delay", "0", "-forced-idr", "1",
-            "-bf", "0", "-no-scenecut", "1",
-          ]
-        : [
-            // Software x264: high sc_threshold effectively disables scene IDR
-            "-sc_threshold", "40",
-          ]),
-      // NUT muxer options
-      ...SYNC_OUTPUT_OPTIONS,
-    ],
+    customFfmpegFlags,
+    ...(customInputOptions.length > 0 ? { customInputOptions } : {}),
+    ...(headers ? { customHeaders: headers } : {}),
+    ...extraOptions,
   };
 }

@@ -51,6 +51,10 @@ export async function pickStream(
     });
 
     const index = parseInt(click.customId.split("_")[1], 10);
+    if (Number.isNaN(index) || index < 0 || index >= streams.length) {
+      await click.deferUpdate();
+      return null;
+    }
     const selected = streams[index];
 
     await click.deferUpdate();

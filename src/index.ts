@@ -1,5 +1,5 @@
 import { config } from "./utils/config.js";
-import { createLogger } from "./utils/logger.js";
+import { createLogger, errStr } from "./utils/logger.js";
 import { autoTune } from "./streamer/encoder.js";
 import { initStreamerClient, destroyStreamerClient } from "./streamer/client.js";
 import { initBotClient, destroyBotClient } from "./bot/client.js";
@@ -14,8 +14,8 @@ async function shutdown(): Promise<void> {
   } catch {
     // Best-effort
   }
-  await destroyStreamerClient();
-  await destroyBotClient();
+  try { await destroyStreamerClient(); } catch { /* best-effort */ }
+  try { await destroyBotClient(); } catch { /* best-effort */ }
   log.info("Shutdown complete");
   process.exit(0);
 }
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   log.info("Bot ready");
 }
 
-main().catch((err) => {
-  log.error(`Fatal error: ${err}`);
+main().catch((err: unknown) => {
+  log.error(`Fatal error: ${errStr(err)}`);
   process.exit(1);
 });

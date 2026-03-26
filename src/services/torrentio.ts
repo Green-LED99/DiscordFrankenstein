@@ -23,6 +23,7 @@ interface ParsedStreamInfo {
   codec: string;
   sizeBytes: number;
   seeders: number;
+  language: string;
 }
 
 function parseResolution(title: string, bingeGroup?: string): number {
@@ -59,6 +60,19 @@ function parseSeeders(title: string): number {
   return match ? parseInt(match[1], 10) : 0;
 }
 
+function parseLanguage(title: string): string {
+  // Torrentio appends language flags like "🇬🇧 / 🇵🇱" or language tags
+  // Common flag emoji ranges: regional indicator symbols U+1F1E6-1F1FF
+  const flagMatch = title.match(/[\u{1F1E6}-\u{1F1FF}]{2}(?:\s*\/\s*[\u{1F1E6}-\u{1F1FF}]{2})*/u);
+  if (flagMatch) return flagMatch[0];
+
+  // Fallback: look for common language labels
+  const langMatch = title.match(/\b(Multi|Dual|ENG|SPA|FRE|GER|ITA|JPN|KOR|RUS|POR|ARA|HIN|CHI)\b/i);
+  if (langMatch) return langMatch[1].toUpperCase();
+
+  return "";
+}
+
 export async function fetchStreams(
   type: "movie" | "series",
   imdbId: string,
@@ -75,7 +89,7 @@ export async function fetchStreams(
   const url = `${config.stremioAddonUrl}${path}`;
   log.info(`Fetching streams: ${path}`);
 
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) {
     throw new Error(`Torrentio error: ${res.status} ${res.statusText}`);
   }
@@ -91,6 +105,7 @@ export interface RankedStream {
   codec: string;
   sizeBytes: number;
   seeders: number;
+  language: string;
   label: string;
 }
 
@@ -110,6 +125,7 @@ function rankStreams(
     codec: parseCodec(stream.title, stream.behaviorHints?.bingeGroup),
     sizeBytes: parseSizeBytes(stream.title),
     seeders: parseSeeders(stream.title),
+    language: parseLanguage(stream.title),
   }));
 
   // Filter to streams within our max resolution
@@ -127,6 +143,7 @@ function rankStreams(
       codec: "unknown",
       sizeBytes: 0,
       seeders: 0,
+      language: parseLanguage(s.title),
       label: `${i + 1}. ${s.name}`,
     }));
   }
@@ -143,7 +160,7 @@ function rankStreams(
 
   return candidates.map((c, i) => ({
     ...c,
-    label: `${i + 1}. ${c.resolution}p ${c.codec.toUpperCase()} | ${formatSize(c.sizeBytes)} | ${c.seeders} seeds`,
+    label: `${i + 1}. ${c.resolution}p ${c.codec.toUpperCase()} | ${formatSize(c.sizeBytes)} | ${c.seeders} seeds${c.language ? ` | ${c.language}` : ""}`,
   }));
 }
 
@@ -160,15 +177,3 @@ export function getTopStreams(
   return top;
 }
 
-export function selectBestStream(
-  streams: TorrentioStream[],
-  maxResolution: number = config.maxResolution
-): TorrentioStream | null {
-  const ranked = rankStreams(streams, maxResolution);
-  if (ranked.length === 0) return null;
-  const best = ranked[0];
-  log.info(
-    `Auto-selected: ${best.resolution}p ${best.codec} (${formatSize(best.sizeBytes)}, ${best.seeders} seeders)`
-  );
-  return best.stream;
-}

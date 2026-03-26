@@ -93,18 +93,3 @@ export function stopSyncMonitor(): void {
   }
 }
 
-export function getSyncStatus(): {
-  avgSpeed: number;
-  warnings: number;
-} | null {
-  if (!activeSyncState || activeSyncState.speeds.length === 0) return null;
-
-  const avgSpeed =
-    activeSyncState.speeds.reduce((a, b) => a + b, 0) /
-    activeSyncState.speeds.length;
-
-  return {
-    avgSpeed,
-    warnings: activeSyncState.warnings,
-  };
-}

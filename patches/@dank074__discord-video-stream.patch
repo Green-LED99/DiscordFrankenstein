@@ -1,16 +1,203 @@
+diff --git a/dist/client/voice/WebRtcWrapper.js b/dist/client/voice/WebRtcWrapper.js
+index 3aaa0cac2ea044495e71edf1bbcf02a1f0c9763b..24032f4b40e23becd5c24fccb9aaddbf4bd1ca6f 100644
+--- a/dist/client/voice/WebRtcWrapper.js
++++ b/dist/client/voice/WebRtcWrapper.js
+@@ -128,7 +128,7 @@ export class WebRtcConnWrapper {
+         const rtpConfigAudio = new RtpPacketizationConfig(audioSsrc, "", CodecPayloadType.opus.payload_type, CodecPayloadType.opus.clockRate);
+         rtpConfigAudio.playoutDelayId = 5;
+         rtpConfigAudio.playoutDelayMin = 0;
+-        rtpConfigAudio.playoutDelayMax = 1;
++        rtpConfigAudio.playoutDelayMax = 0;
+         this._audioPacketizer = new RtpPacketizer(rtpConfigAudio);
+         this._audioPacketizer.addToChain(new RtcpSrReporter(rtpConfigAudio));
+         this._audioPacketizer.addToChain(new RtcpNackResponder());
+@@ -136,7 +136,7 @@ export class WebRtcConnWrapper {
+         const rtpConfigVideo = new RtpPacketizationConfig(videoSsrc, "", CodecPayloadType[this._videoCodec].payload_type, CodecPayloadType[this._videoCodec].clockRate);
+         rtpConfigVideo.playoutDelayId = 5;
+         rtpConfigVideo.playoutDelayMin = 0;
+-        rtpConfigVideo.playoutDelayMax = 10;
++        rtpConfigVideo.playoutDelayMax = 0;
+         switch (this._videoCodec) {
+             case "H264":
+                 this._videoPacketizer = new H264RtpPacketizer("StartSequence", rtpConfigVideo);
+diff --git a/dist/media/BaseMediaStream.js b/dist/media/BaseMediaStream.js
+index 3bf6f2a7e8bd41c904af813b350ea1a756bfa380..884c34bd65f093efa603052b6f79adf8425989bd 100644
+--- a/dist/media/BaseMediaStream.js
++++ b/dist/media/BaseMediaStream.js
+@@ -3,7 +3,7 @@ import { setTimeout } from "node:timers/promises";
+ import { Writable } from "node:stream";
+ export class BaseMediaStream extends Writable {
+     _pts;
+-    _syncTolerance = 20;
++    _syncTolerance = 50;
+     _loggerSend;
+     _loggerSync;
+     _loggerSleep;
+@@ -79,6 +79,10 @@ export class BaseMediaStream extends Writable {
+     resetTimingCompensation() {
+         this._startTime = this._startPts = undefined;
+     }
++    async precisionSleep(ms) {
++        if (ms < 1) return;
++        await setTimeout(Math.max(1, Math.round(ms)));
++    }
+     async _write(frame, _, callback) {
+         const { data, pts, duration, timeBase } = frame;
+         if (!data) {
+@@ -86,6 +90,12 @@ export class BaseMediaStream extends Writable {
+             callback();
+             return;
+         }
++        // Diagnostic: count frames and log stats every 300 frames
++        this._frameCount = (this._frameCount ?? 0) + 1;
++        this._sleepZeroCount = this._sleepZeroCount ?? 0;
++        this._deficitResetCount = this._deficitResetCount ?? 0;
++        this._driftCorrCount = this._driftCorrCount ?? 0;
++        this._lastStatsTime = this._lastStatsTime ?? performance.now();
+         const frametime = (Number(duration) / timeBase.den) * timeBase.num * 1000;
+         const start_sendFrame = performance.now();
+         await this._sendFrame(Buffer.from(data), frametime);
+@@ -115,44 +125,42 @@ export class BaseMediaStream extends Writable {
+             this._startPts +
+             frametime -
+             (end_sendFrame - this._startTime));
+-        if (this._noSleep || sleep === 0) {
++        if (this._noSleep) {
+             callback(null);
+         }
+-        else if (this.sync && this.isBehind()) {
+-            this._loggerSync.debug({
+-                stats: {
+-                    pts: this.pts,
+-                    pts_other: this.syncStream?.pts,
+-                },
+-            }, "Stream is behind. Not sleeping for this frame");
+-            this.resetTimingCompensation();
++        else if (sleep === 0) {
++            this._sleepZeroCount++;
++            const deficit = (end_sendFrame - this._startTime) -
++                (this._pts - this._startPts + frametime);
++            if (deficit > 200) {
++                this._deficitResetCount++;
++                this._loggerSync.debug({ stats: { deficit: deficit.toFixed(1) } }, `Stream ${deficit.toFixed(0)}ms behind, resetting timing`);
++                this.resetTimingCompensation();
++            }
+             callback(null);
+         }
+-        else if (this.sync && this.isAhead()) {
+-            do {
+-                this._loggerSync.debug({
+-                    stats: {
+-                        pts: this.pts,
+-                        pts_other: this.syncStream?.pts,
+-                        frametime,
+-                    },
+-                }, `Stream is ahead. Waiting for ${frametime}ms`);
+-                await setTimeout(frametime);
+-            } while (this.sync && this.isAhead());
+-            this.resetTimingCompensation();
++        else {
++            let adjustedSleep = sleep;
++            if (this.sync) {
++                const drift = this.ptsDelta() ?? 0;
++                if (drift > this.syncTolerance) {
++                    this._loggerSync.debug({ stats: { pts: this.pts, pts_other: this.syncStream?.pts, drift } }, `Stream ahead by ${drift.toFixed(1)}ms, adding to sleep`);
++                    adjustedSleep = sleep + drift;
++                }
++            }
++            if (adjustedSleep !== sleep) this._driftCorrCount++;
++            await this.precisionSleep(adjustedSleep);
+             callback(null);
+         }
+-        else {
+-            this._loggerSleep.debug({
+-                stats: {
+-                    pts: this._pts,
+-                    startPts: this._startPts,
+-                    time: end_sendFrame,
+-                    startTime: this._startTime,
+-                    frametime,
+-                },
+-            }, `Sleeping for ${sleep}ms`);
+-            setTimeout(sleep).then(() => callback(null));
++        // Periodic stats (every 300 frames ≈ 10s at 30fps)
++        if (this._frameCount % 300 === 0) {
++            const elapsed = ((performance.now() - this._lastStatsTime) / 1000).toFixed(1);
++            const heap = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
++            console.log(`[DIAG] ${this._frameCount} frames in ${elapsed}s | sleep0=${this._sleepZeroCount} deficitReset=${this._deficitResetCount} driftCorr=${this._driftCorrCount} | pts=${this._pts?.toFixed(0)} | heap=${heap}MB`);
++            this._sleepZeroCount = 0;
++            this._deficitResetCount = 0;
++            this._driftCorrCount = 0;
++            this._lastStatsTime = performance.now();
+         }
+         frame.free();
+     }
+diff --git a/dist/media/newApi.js b/dist/media/newApi.js
+index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..6bdab700749274f6b8be21792e0c0c0219977e71 100644
+--- a/dist/media/newApi.js
++++ b/dist/media/newApi.js
+@@ -67,6 +67,9 @@ export function prepareStream(input, options = {}, cancelSignal) {
+             },
+             customInputOptions: opts.customInputOptions ?? defaultOptions.customInputOptions,
+             customFfmpegFlags: opts.customFfmpegFlags ?? defaultOptions.customFfmpegFlags,
++            // Patched: pass through subtitle and audio options
++            subtitlePath: opts.subtitlePath,
++            audioStreamIndex: opts.audioStreamIndex,
+         };
+     }
+     const mergedOptions = mergeOptions(options);
+@@ -95,9 +98,14 @@ export function prepareStream(input, options = {}, cancelSignal) {
+         command.addOptions(["-fflags nobuffer", "-analyzeduration 0"]);
+     }
+     if (isHttpUrl) {
+-        command.inputOption("-headers", Object.entries(customHeaders)
+-            .map(([k, v]) => `${k}: ${v}`)
+-            .join("\r\n"));
++        // Patched: separate User-Agent for HLS compatibility
++        const ua = customHeaders["User-Agent"];
++        if (ua) command.inputOption("-user_agent", ua);
++        const otherHeaders = Object.entries(customHeaders)
++            .filter(([k]) => k !== "User-Agent")
++            .map(([k, v]) => `${k}: ${v}`)
++            .join("\r\n");
++        if (otherHeaders) command.inputOption("-headers", otherHeaders);
+         if (!isHls) {
+             command.inputOptions([
+                 "-reconnect 1",
+@@ -118,6 +126,17 @@ export function prepareStream(input, options = {}, cancelSignal) {
+     }
+     else {
+         command.videoFilter(`scale=${width}:${height}`);
++        // Patched: inject subtitle burn filter after scale (combines via comma)
++        if (mergedOptions.subtitlePath) {
++            const escaped = mergedOptions.subtitlePath
++                .replace(/\\/g, "/")
++                .replace(/^([A-Za-z]):/, "$1\\\\:")
++                .replace(/'/g, "\\\\'")
++                .replace(/\[/g, "\\\\[")
++                .replace(/\]/g, "\\\\]")
++                .replace(/;/g, "\\\\;")
++                .replace(/ /g, "\\\\ ");
++            command.videoFilter(`subtitles=${escaped}:force_style='Fontsize=24'`);
++        }
+         if (frameRate)
+             command.fpsOutput(frameRate);
+         command.addOutputOption([
+@@ -147,7 +161,7 @@ export function prepareStream(input, options = {}, cancelSignal) {
+     const { includeAudio, bitrateAudio } = mergedOptions;
+     if (includeAudio)
+         command
+-            .addOutputOption("-map 0:a:0?")
++            .addOutputOption(`-map 0:a:${mergedOptions.audioStreamIndex ?? 0}?`)
+             .audioChannels(2)
+             /*
+              * I don't have much surround sound material to test this with,
 diff --git a/src/client/voice/WebRtcWrapper.ts b/src/client/voice/WebRtcWrapper.ts
-index 997d78ea86793dea2ac11532aa0a8c85efe2197b..28067bbb5146e37a6347b1e33820f3d1c097bcfe 100644
+index 997d78ea86793dea2ac11532aa0a8c85efe2197b..02f2abba98b74f5b7c6c32ff6d7f2f0026126a80 100644
 --- a/src/client/voice/WebRtcWrapper.ts
 +++ b/src/client/voice/WebRtcWrapper.ts
-@@ -168,9 +168,14 @@ export class WebRtcConnWrapper {
-       CodecPayloadType.opus.payload_type,
-       CodecPayloadType.opus.clockRate,
+@@ -170,7 +170,7 @@ export class WebRtcConnWrapper {
      );
-+    // Patched: set playout delay to 0/0 on both audio and video (matching
-+    // WrappedStream). The original values (audio max=1=100ms, video max=10=1s)
-+    // tell Discord's client it can buffer video for up to 1 second while playing
-+    // audio almost immediately, causing a ~1s audio-ahead-of-video offset.
-+    // Zero playout delay forces immediate rendering of both streams.
      rtpConfigAudio.playoutDelayId = 5;
      rtpConfigAudio.playoutDelayMin = 0;
 -    rtpConfigAudio.playoutDelayMax = 1;
@@ -18,7 +205,7 @@ index 997d78ea86793dea2ac11532aa0a8c85efe2197b..28067bbb5146e37a6347b1e33820f3d1
      this._audioPacketizer = new RtpPacketizer(rtpConfigAudio);
      this._audioPacketizer.addToChain(new RtcpSrReporter(rtpConfigAudio));
      this._audioPacketizer.addToChain(new RtcpNackResponder());
-@@ -184,7 +189,7 @@ export class WebRtcConnWrapper {
+@@ -184,7 +184,7 @@ export class WebRtcConnWrapper {
      );
      rtpConfigVideo.playoutDelayId = 5;
      rtpConfigVideo.playoutDelayMin = 0;
@@ -28,7 +215,7 @@ index 997d78ea86793dea2ac11532aa0a8c85efe2197b..28067bbb5146e37a6347b1e33820f3d1
        case "H264":
          this._videoPacketizer = new H264RtpPacketizer(
 diff --git a/src/media/BaseMediaStream.ts b/src/media/BaseMediaStream.ts
-index 6a53ad1490979bbb782599efca0eaf5a640a5d28..e4477e508b36b7eeb4326573c7355b8d08ac0ae3 100644
+index 6a53ad1490979bbb782599efca0eaf5a640a5d28..95cd3093451f77904fc64cebba6e12dbde593408 100644
 --- a/src/media/BaseMediaStream.ts
 +++ b/src/media/BaseMediaStream.ts
 @@ -5,7 +5,7 @@ import type { Packet } from "node-av";
@@ -40,80 +227,131 @@ index 6a53ad1490979bbb782599efca0eaf5a640a5d28..e4477e508b36b7eeb4326573c7355b8d
    private _loggerSend: Log;
    private _loggerSync: Log;
    private _loggerSleep: Log;
-@@ -87,6 +87,27 @@ export class BaseMediaStream extends Writable {
+@@ -87,6 +87,10 @@ export class BaseMediaStream extends Writable {
    private resetTimingCompensation() {
      this._startTime = this._startPts = undefined;
    }
-+
-+  /**
-+   * Precision sleep: setTimeout for the bulk (waking ~2ms early),
-+   * then spin-wait for the remainder. This overcomes the Windows
-+   * timer resolution of ~15.6ms which causes visible stutter with
-+   * standard setTimeout alone.
-+   * Based on WrappedStream's implementation.
-+   */
 +  private async precisionSleep(ms: number): Promise<void> {
 +    if (ms < 1) return;
-+    const deadline = performance.now() + ms;
-+    if (ms > 5) {
-+      // Sleep the coarse portion, waking ~2ms early to spin the rest
-+      await setTimeout(Math.max(1, Math.floor(ms - 2)));
-+    }
-+    // Spin-wait for sub-millisecond accuracy
-+    while (performance.now() < deadline) {
-+      // Intentional busy-wait for precision
-+    }
++    await setTimeout(Math.max(1, Math.round(ms)));
 +  }
-+
    async _write(
      frame: Packet,
      _: BufferEncoding,
-@@ -153,7 +174,7 @@ export class BaseMediaStream extends Writable {
-         },
-         "Stream is behind. Not sleeping for this frame",
-       );
+@@ -141,50 +145,33 @@ export class BaseMediaStream extends Writable {
+         frametime -
+         (end_sendFrame - this._startTime),
+     );
+-    if (this._noSleep || sleep === 0) {
+-      callback(null);
+-    } else if (this.sync && this.isBehind()) {
+-      this._loggerSync.debug(
+-        {
+-          stats: {
+-            pts: this.pts,
+-            pts_other: this.syncStream?.pts,
+-          },
+-        },
+-        "Stream is behind. Not sleeping for this frame",
+-      );
 -      this.resetTimingCompensation();
-+      // Patched: do NOT resetTimingCompensation() — keeps timing stable
++    if (this._noSleep) {
        callback(null);
-     } else if (this.sync && this.isAhead()) {
-       do {
-@@ -167,9 +188,9 @@ export class BaseMediaStream extends Writable {
-           },
-           `Stream is ahead. Waiting for ${frametime}ms`,
+-    } else if (this.sync && this.isAhead()) {
+-      do {
++    } else if (sleep === 0) {
++      const deficit = (end_sendFrame - this._startTime) -
++        (this._pts - this._startPts + frametime);
++      if (deficit > 200) {
+         this._loggerSync.debug(
+-          {
+-            stats: {
+-              pts: this.pts,
+-              pts_other: this.syncStream?.pts,
+-              frametime,
+-            },
+-          },
+-          `Stream is ahead. Waiting for ${frametime}ms`,
++          { stats: { deficit: deficit.toFixed(1) } },
++          `Stream ${deficit.toFixed(0)}ms behind, resetting timing`,
          );
 -        await setTimeout(frametime);
-+        await this.precisionSleep(frametime);
-       } while (this.sync && this.isAhead());
+-      } while (this.sync && this.isAhead());
 -      this.resetTimingCompensation();
-+      // Patched: do NOT resetTimingCompensation() — keeps timing stable
++        this.resetTimingCompensation();
++      }
        callback(null);
      } else {
-       this._loggerSleep.debug(
-@@ -184,7 +205,8 @@ export class BaseMediaStream extends Writable {
-         },
-         `Sleeping for ${sleep}ms`,
-       );
+-      this._loggerSleep.debug(
+-        {
+-          stats: {
+-            pts: this._pts,
+-            startPts: this._startPts,
+-            time: end_sendFrame,
+-            startTime: this._startTime,
+-            frametime,
+-          },
+-        },
+-        `Sleeping for ${sleep}ms`,
+-      );
 -      setTimeout(sleep).then(() => callback(null));
-+      // Use precisionSleep instead of setTimeout for accurate frame pacing
-+      this.precisionSleep(sleep).then(() => callback(null));
++      let adjustedSleep = sleep;
++      if (this.sync) {
++        const drift = this.ptsDelta() ?? 0;
++        if (drift > this.syncTolerance) {
++          this._loggerSync.debug(
++            { stats: { pts: this.pts, pts_other: this.syncStream?.pts, drift } },
++            `Stream ahead by ${drift.toFixed(1)}ms, adding to sleep`,
++          );
++          adjustedSleep = sleep + drift;
++        }
++      }
++      await this.precisionSleep(adjustedSleep);
++      callback(null);
      }
      frame.free();
    }
-diff --git a/src/media/LibavDemuxer.ts b/src/media/LibavDemuxer.ts
-index 01ebf724d0183fcdb92d918d21c3f73217f51c62..0093db72b3fadf33a2d70c0d924d7254c011123c 100644
---- a/src/media/LibavDemuxer.ts
-+++ b/src/media/LibavDemuxer.ts
-@@ -132,11 +132,11 @@ export async function demux(input: Readable, { format }: DemuxerOptions) {
-   let aInfo: AudioStreamInfo | undefined;
-   const vPipe = new PassThrough({
-     objectMode: true,
--    writableHighWaterMark: 128,
-+    writableHighWaterMark: 8,
-   });
-   const aPipe = new PassThrough({
-     objectMode: true,
--    writableHighWaterMark: 128,
-+    writableHighWaterMark: 8,
-   });
+diff --git a/src/media/newApi.ts b/src/media/newApi.ts
+index 3b8682afaaa7917d4d5f394d01af73a693761018..743ffeecc727bda6d57a4aaace38049584677683 100644
+--- a/src/media/newApi.ts
++++ b/src/media/newApi.ts
+@@ -192,7 +192,10 @@ export function prepareStream(
+         opts.customInputOptions ?? defaultOptions.customInputOptions,
+       customFfmpegFlags:
+         opts.customFfmpegFlags ?? defaultOptions.customFfmpegFlags,
+-    } satisfies PrepareStreamOptions;
++      // Patched: pass through subtitle and audio options
++      subtitlePath: (opts as any).subtitlePath,
++      audioStreamIndex: (opts as any).audioStreamIndex,
++    } satisfies PrepareStreamOptions as any;
+   }
  
-   const vbsf: BitStreamFilterAPI[] = [];
+   const mergedOptions = mergeOptions(options);
+@@ -270,6 +273,18 @@ export function prepareStream(
+   } else {
+     command.videoFilter(`scale=${width}:${height}`);
+ 
++    // Patched: inject subtitle burn filter after scale (combines via comma)
++    if ((mergedOptions as any).subtitlePath) {
++      const escaped = ((mergedOptions as any).subtitlePath as string)
++        .replace(/\\/g, "/")
++        .replace(/^([A-Za-z]):/, "$1\\\\:")
++        .replace(/'/g, "\\\\'")
++        .replace(/\[/g, "\\\\[")
++        .replace(/\]/g, "\\\\]")
++        .replace(/;/g, "\\\\;");
++      command.videoFilter(`subtitles=${escaped}:force_style='Fontsize=24'`);
++    }
++
+     if (frameRate) command.fpsOutput(frameRate);
+ 
+     command.addOutputOption([
+@@ -301,7 +316,7 @@ export function prepareStream(
+   const { includeAudio, bitrateAudio } = mergedOptions;
+   if (includeAudio)
+     command
+-      .addOutputOption("-map 0:a:0?")
++      .addOutputOption(`-map 0:a:${(mergedOptions as any).audioStreamIndex ?? 0}?`)
+       .audioChannels(2)
+       /*
+        * I don't have much surround sound material to test this with,

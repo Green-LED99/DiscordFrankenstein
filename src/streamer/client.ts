@@ -10,6 +10,9 @@ let streamer: Streamer | null = null;
 
 export async function initStreamerClient(): Promise<void> {
   selfbotClient = new Client();
+  selfbotClient.on("error", (err) => {
+    log.error(`Selfbot client error: ${err.message}`);
+  });
   streamer = new Streamer(selfbotClient);
 
   await selfbotClient.login(config.userToken);
