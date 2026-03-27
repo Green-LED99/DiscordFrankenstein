@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   ApplicationCommandOptionType,
   type Client,
@@ -7,9 +10,10 @@ import { createLogger, errStr } from "../../utils/logger.js";
 import { config } from "../../utils/config.js";
 
 const log = createLogger("Commands");
+const HASH_FILE = join(process.cwd(), ".command-hash");
 const API_BASE = "https://discord.com/api/v10";
 
-const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
+export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   {
     name: "movie",
     description: "Stream a movie to your voice channel",
@@ -125,74 +129,169 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   },
 ];
 
+interface HashFile {
+  global: string;
+  guilds: Record<string, string>;
+}
+
+async function loadHashFile(): Promise<HashFile> {
+  try {
+    const raw: unknown = JSON.parse(await readFile(HASH_FILE, "utf-8"));
+    if (typeof raw === "object" && raw !== null) {
+      const obj = raw as Record<string, unknown>;
+      return {
+        global: typeof obj.global === "string" ? obj.global : "",
+        guilds:
+          typeof obj.guilds === "object" && obj.guilds !== null
+            ? (obj.guilds as Record<string, string>)
+            : {},
+      };
+    }
+  } catch {
+    // File doesn't exist or is invalid — register everything
+  }
+  return { global: "", guilds: {} };
+}
+
+async function saveHashFile(data: HashFile): Promise<void> {
+  await writeFile(HASH_FILE, JSON.stringify(data, null, 2), "utf-8").catch(
+    (err) => log.warn(`Failed to save command hash: ${errStr(err)}`),
+  );
+}
+
+function computeCommandHash(): string {
+  return createHash("sha256").update(JSON.stringify(commands)).digest("hex");
+}
+
 /**
- * Register guild commands using the Discord REST API directly.
- * Clears global commands first (prevents stale commands appearing on wrong accounts),
- * then always PUTs the full command set to each guild for a guaranteed fresh state.
+ * Register commands using the Discord REST API directly.
+ * Uses both global (universal coverage) and guild-specific (instant availability).
+ * Hash-based deduplication skips registration when nothing has changed.
  */
 export async function registerCommands(client: Client<true>): Promise<void> {
   const appId = client.application.id;
   const guilds = client.guilds.cache;
+  const currentHash = computeCommandHash();
+  const hashFile = await loadHashFile();
+  const commandsChanged = hashFile.global !== currentHash;
 
-  // 1. Clear any global commands (stale globals can show on all guilds / wrong accounts)
-  await clearGlobalCommands(appId);
+  if (commandsChanged) {
+    // --- Commands changed: re-register globally + all guilds ---
+    log.info("Command definitions changed — registering globally and to all guilds");
 
-  // 2. Always register guild commands (idempotent PUT — ensures fresh state every boot)
-  log.info(`Registering ${commands.length} commands to ${guilds.size} guild(s)...`);
-
-  for (const [guildId, guild] of guilds) {
     try {
-      await registerToGuild(appId, guildId);
-      log.info(`Registered ${commands.length} commands in ${guild.name}`);
+      await registerGlobal(appId);
+      hashFile.global = currentHash;
+      await saveHashFile(hashFile);
+      log.info("Global commands registered");
     } catch (err) {
-      log.error(`Failed to register commands in ${guild.name}: ${errStr(err)}`);
+      log.error(`Failed to register global commands: ${errStr(err)}`);
+      // Continue to guild registration — guild commands work independently
+    }
+
+    log.info(
+      `Registering ${commands.length} commands to ${guilds.size} guild(s)...`,
+    );
+    for (const [guildId, guild] of guilds) {
+      try {
+        await registerToGuild(appId, guildId);
+        hashFile.guilds[guildId] = currentHash;
+        await saveHashFile(hashFile);
+        log.info(`Registered ${commands.length} commands in ${guild.name}`);
+      } catch (err) {
+        log.error(
+          `Failed to register commands in ${guild.name}: ${errStr(err)}`,
+        );
+      }
+    }
+  } else {
+    // --- Commands unchanged: only register to new guilds ---
+    const pending = [...guilds.entries()].filter(
+      ([guildId]) => hashFile.guilds[guildId] !== currentHash,
+    );
+
+    if (pending.length === 0) {
+      log.info(
+        `Commands unchanged (hash: ${currentHash.slice(0, 8)}...), all ${guilds.size} guild(s) up to date — skipping`,
+      );
+      return;
+    }
+
+    log.info(
+      `Commands unchanged — registering to ${pending.length} new guild(s)...`,
+    );
+    for (const [guildId, guild] of pending) {
+      try {
+        await registerToGuild(appId, guildId);
+        hashFile.guilds[guildId] = currentHash;
+        await saveHashFile(hashFile);
+        log.info(`Registered ${commands.length} commands in ${guild.name}`);
+      } catch (err) {
+        log.error(
+          `Failed to register commands in ${guild.name}: ${errStr(err)}`,
+        );
+      }
     }
   }
 
-  log.info("Guild command registration complete");
+  log.info("Command registration complete");
 }
 
-/** Clear all global (non-guild) commands for this application. */
-async function clearGlobalCommands(appId: string): Promise<void> {
-  const url = `${API_BASE}/applications/${appId}/commands`;
-  try {
-    const res = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bot ${config.botToken}`,
-        "Content-Type": "application/json",
-      },
-      body: "[]",
-    });
+/** Register commands to a guild that was joined at runtime. */
+export async function registerCommandsToNewGuild(
+  appId: string,
+  guildId: string,
+  guildName: string,
+): Promise<void> {
+  const currentHash = computeCommandHash();
+  const hashFile = await loadHashFile();
 
-    if (res.ok) {
-      log.info("Cleared global commands");
-    } else if (res.status === 429) {
-      const body = await res.json() as { retry_after?: number };
-      log.warn(`Rate limited clearing globals — retrying after ${body.retry_after ?? 5}s`);
-      await sleep((body.retry_after ?? 5) * 1000);
-      await fetch(url, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bot ${config.botToken}`,
-          "Content-Type": "application/json",
-        },
-        body: "[]",
-      });
-    } else {
-      const text = await res.text();
-      log.warn(`Failed to clear global commands: HTTP ${res.status} — ${text}`);
-    }
-  } catch (err) {
-    log.warn(`Failed to clear global commands: ${errStr(err)}`);
+  if (hashFile.guilds[guildId] === currentHash) {
+    log.info(`Commands already registered in ${guildName} — skipping`);
+    return;
+  }
+
+  await registerToGuild(appId, guildId);
+  hashFile.guilds[guildId] = currentHash;
+  await saveHashFile(hashFile);
+  log.info(`Registered ${commands.length} commands in new guild ${guildName}`);
+}
+
+/** PUT commands to the global endpoint, handling rate limits with one retry. */
+async function registerGlobal(appId: string): Promise<void> {
+  const url = `${API_BASE}/applications/${appId}/commands`;
+  const res = await putCommands(url);
+
+  if (res.status === 429) {
+    await retryAfterRateLimit(res, url);
+    return;
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
   }
 }
 
 /** PUT commands to a single guild, handling rate limits with one retry. */
 async function registerToGuild(appId: string, guildId: string): Promise<void> {
   const url = `${API_BASE}/applications/${appId}/guilds/${guildId}/commands`;
+  const res = await putCommands(url);
 
-  const res = await fetch(url, {
+  if (res.status === 429) {
+    await retryAfterRateLimit(res, url);
+    return;
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+}
+
+/** Shared PUT request for command registration. */
+async function putCommands(url: string): Promise<Response> {
+  return fetch(url, {
     method: "PUT",
     headers: {
       Authorization: `Bot ${config.botToken}`,
@@ -200,33 +299,19 @@ async function registerToGuild(appId: string, guildId: string): Promise<void> {
     },
     body: JSON.stringify(commands),
   });
+}
 
-  // Rate limited — wait and retry once
-  if (res.status === 429) {
-    const body = await res.json() as { retry_after?: number };
-    const retryAfter = body.retry_after ?? 5;
-    log.warn(`Rate limited (429) — retrying after ${retryAfter}s...`);
-    await sleep(retryAfter * 1000);
+/** Handle 429 rate limit: wait and retry once. */
+async function retryAfterRateLimit(res: Response, url: string): Promise<void> {
+  const body = (await res.json()) as { retry_after?: number };
+  const retryAfter = body.retry_after ?? 5;
+  log.warn(`Rate limited (429) — retrying after ${retryAfter}s...`);
+  await sleep(retryAfter * 1000);
 
-    const retry = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bot ${config.botToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(commands),
-    });
-
-    if (!retry.ok) {
-      const text = await retry.text();
-      throw new Error(`HTTP ${retry.status} on retry: ${text}`);
-    }
-    return;
-  }
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`HTTP ${res.status}: ${text}`);
+  const retry = await putCommands(url);
+  if (!retry.ok) {
+    const text = await retry.text();
+    throw new Error(`HTTP ${retry.status} on retry: ${text}`);
   }
 }
 

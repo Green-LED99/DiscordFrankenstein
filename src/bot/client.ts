@@ -2,7 +2,7 @@ import { Client, GatewayIntentBits } from "discord.js";
 import { config } from "../utils/config.js";
 import { createLogger, errStr } from "../utils/logger.js";
 import { handleInteraction } from "./interactions.js";
-import { registerCommands } from "./commands/register.js";
+import { registerCommands, registerCommandsToNewGuild } from "./commands/register.js";
 
 const log = createLogger("Bot");
 
@@ -25,6 +25,14 @@ export async function initBotClient(): Promise<void> {
     registerCommands(client)
       .then(() => log.info("Bot ready"))
       .catch((err) => log.error(`Command registration failed: ${errStr(err)} — bot is still functional with cached commands`));
+  });
+
+  botClient.on("guildCreate", (guild) => {
+    const appId = guild.client.application?.id;
+    if (!appId) return;
+    registerCommandsToNewGuild(appId, guild.id, guild.name).catch((err) =>
+      log.error(`Failed to register commands in new guild ${guild.name}: ${errStr(err)}`),
+    );
   });
 
   await botClient.login(config.botToken);
