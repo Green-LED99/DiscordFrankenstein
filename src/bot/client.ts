@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits } from "discord.js";
 import { config } from "../utils/config.js";
-import { createLogger } from "../utils/logger.js";
+import { createLogger, errStr } from "../utils/logger.js";
 import { handleInteraction } from "./interactions.js";
 import { registerCommands } from "./commands/register.js";
 
@@ -19,10 +19,12 @@ export async function initBotClient(): Promise<void> {
   botClient.on("interactionCreate", handleInteraction);
   botClient.on("error", (err: Error) => log.error(`Discord client error: ${err.stack ?? err.message}`));
 
-  botClient.once("ready", async (client) => {
+  botClient.once("ready", (client) => {
     log.info(`Bot logged in as ${client.user.tag}`);
-    await registerCommands(client);
-    log.info("Bot ready");
+    // Register commands in background — don't block the bot from handling interactions
+    registerCommands(client)
+      .then(() => log.info("Bot ready"))
+      .catch((err) => log.error(`Command registration failed: ${errStr(err)} — bot is still functional with cached commands`));
   });
 
   await botClient.login(config.botToken);

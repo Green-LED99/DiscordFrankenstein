@@ -252,8 +252,10 @@ async function teardownStream(leaveVoice: boolean): Promise<TeardownResult> {
   // 9. Null out active stream
   activeStream = null;
 
-  // 10. Always leave voice (library voice state corrupts after abort — must rejoin fresh)
-  try { streamer.leaveVoice(); } catch { /* already left */ }
+  // 10. Leave voice only when requested (skip/seek preserve voice for faster restart)
+  if (leaveVoice) {
+    try { streamer.leaveVoice(); } catch { /* already left */ }
+  }
 
   log.info(`teardownStream: complete (leaveVoice=${leaveVoice})`);
   return result;
@@ -302,12 +304,10 @@ async function handleStreamEnd(reason: "natural" | "watchdog"): Promise<void> {
 // ── Public: Pause ───────────────────────────────────────────────────────
 
 /**
- * Pause the current stream. Saves elapsed time for resume.
- * @param options.preserveVoice - true for seek/skip (keep Go Live), false for user /pause
+ * Pause the current stream. Saves elapsed time + stream context for resume.
+ * Kills FFmpeg and leaves voice channel (ends Go Live).
  */
-export async function pauseStream(
-  options?: { preserveVoice?: boolean }
-): Promise<{ elapsedSec: number; title: string }> {
+export async function pauseStream(): Promise<{ elapsedSec: number; title: string }> {
   const { promise: waitForLock, release } = acquireStreamLock();
   await waitForLock;
 
@@ -332,15 +332,76 @@ export async function pauseStream(
       seriesInfo: activeStream.seriesInfo,
     };
 
-    const preserveVoice = options?.preserveVoice ?? false;
-    log.info(`Pausing "${title}" at ${elapsedSec.toFixed(1)}s (preserveVoice=${preserveVoice})`);
-
-    await teardownStream(!preserveVoice);
+    log.info(`Pausing "${title}" at ${elapsedSec.toFixed(1)}s`);
+    await teardownStream(true);
 
     return { elapsedSec, title };
   } finally {
     release();
   }
+}
+
+// ── Public: Restart at Position (for /skip and /seek) ───────────────────
+
+/**
+ * Atomically stop the current stream and relaunch at a new position.
+ * Runs entirely under ONE lock so nothing can race between teardown and restart.
+ * FFmpeg is relaunched with `-ss <seekSec>` for fast keyframe seek.
+ *
+ * Must leave voice and rejoin — the library cannot preserve Go Live across
+ * FFmpeg restarts. A 1-second delay ensures the old FFmpeg process is fully
+ * reaped before spawning a new one (prevents zombie overlap).
+ */
+export async function restartAtPosition(seekSec: number): Promise<void> {
+  const { promise: waitForLock, release } = acquireStreamLock();
+  await waitForLock;
+
+  try {
+    if (!activeStream) throw new Error("No active stream to restart");
+    if (activeStream.isLive) throw new Error("Cannot seek/skip in a live stream");
+
+    // Capture everything we need from the active stream before teardown
+    const {
+      guildId, channelId, streamUrl, audioStreamIndex,
+      subtitlePath, sourceInfo, headers, contentTitle, seriesInfo,
+    } = activeStream;
+
+    log.info(`restartAtPosition: "${contentTitle}" → ${seekSec.toFixed(1)}s`);
+
+    // Teardown current stream — must leave voice (library can't reuse Go Live)
+    await teardownStream(true);
+
+    // Wait for OS to fully reap the old FFmpeg process
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Verify no zombie FFmpeg before spawning new one
+    const zombieCheck = await isAnyFfmpegRunning();
+    if (zombieCheck) {
+      log.warn("restartAtPosition: zombie FFmpeg detected, killing...");
+      await killAllFfmpegAndVerify();
+    }
+
+    // Relaunch at the new position (inline, no second lock acquisition)
+    await startVideoStreamInner(
+      guildId, channelId, streamUrl, audioStreamIndex,
+      subtitlePath, sourceInfo, headers, false,
+      seekSec, contentTitle, seriesInfo,
+    );
+
+    log.info(`restartAtPosition: relaunched at ${seekSec.toFixed(1)}s`);
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Get the current elapsed time in seconds for the active stream.
+ * Returns null if nothing is playing.
+ */
+export function getCurrentElapsedSec(): number | null {
+  if (!activeStream) return null;
+  const wallElapsed = (Date.now() - activeStream.startedAt) / 1000;
+  return wallElapsed + activeStream.seekOffsetSec;
 }
 
 // ── Public: Stop ────────────────────────────────────────────────────────
@@ -421,13 +482,23 @@ async function startVideoStreamInner(
   contentTitle?: string,
   seriesInfo?: SeriesInfo,
 ): Promise<void> {
-  // Tear down any existing stream (preserve voice — we're about to rejoin anyway)
+  // Tear down any existing stream — must leave voice (library can't reuse Go Live)
   if (activeStream) {
     log.info("Tearing down existing stream before starting new one");
-    await teardownStream(false);
+    await teardownStream(true);
+
+    // Wait for OS to fully reap the old FFmpeg process
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Verify no zombie FFmpeg before spawning new one
+    const zombieCheck = await isAnyFfmpegRunning();
+    if (zombieCheck) {
+      log.warn("Zombie FFmpeg detected after teardown — killing");
+      await killAllFfmpegAndVerify();
+    }
   }
 
-  // Pre-spawn safety: verify no stale FFmpeg
+  // Pre-spawn safety: also check for stale FFmpeg even if there was no active stream
   const stale = await isAnyFfmpegRunning();
   if (stale) {
     log.warn("Stale FFmpeg detected before prepareStream — killing");

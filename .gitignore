@@ -11,3 +11,4 @@ dist/
 test_input.ts
 test_stream.ts
 test_timing.ts
+.command-hash

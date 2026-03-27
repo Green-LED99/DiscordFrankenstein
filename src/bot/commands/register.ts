@@ -3,9 +3,11 @@ import {
   type Client,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
 } from "discord.js";
-import { createLogger } from "../../utils/logger.js";
+import { createLogger, errStr } from "../../utils/logger.js";
+import { config } from "../../utils/config.js";
 
 const log = createLogger("Commands");
+const API_BASE = "https://discord.com/api/v10";
 
 const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   {
@@ -123,32 +125,111 @@ const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   },
 ];
 
+/**
+ * Register guild commands using the Discord REST API directly.
+ * Clears global commands first (prevents stale commands appearing on wrong accounts),
+ * then always PUTs the full command set to each guild for a guaranteed fresh state.
+ */
 export async function registerCommands(client: Client<true>): Promise<void> {
-  log.info("Clearing stale global commands...");
-  await client.application.commands.set([]);
-  log.info("Global commands cleared");
-
+  const appId = client.application.id;
   const guilds = client.guilds.cache;
 
-  // Clear existing guild commands first
-  log.info(`Clearing guild commands from ${guilds.size} guild(s)...`);
+  // 1. Clear any global commands (stale globals can show on all guilds / wrong accounts)
+  await clearGlobalCommands(appId);
+
+  // 2. Always register guild commands (idempotent PUT — ensures fresh state every boot)
+  log.info(`Registering ${commands.length} commands to ${guilds.size} guild(s)...`);
+
   for (const [guildId, guild] of guilds) {
     try {
-      await client.application.commands.set([], guildId);
-      log.info(`Cleared commands in ${guild.name}`);
+      await registerToGuild(appId, guildId);
+      log.info(`Registered ${commands.length} commands in ${guild.name}`);
     } catch (err) {
-      log.warn(`Failed to clear commands in ${guild.name}: ${err}`);
+      log.error(`Failed to register commands in ${guild.name}: ${errStr(err)}`);
     }
   }
 
-  log.info(`Registering slash commands to ${guilds.size} guild(s)...`);
-  for (const [guildId, guild] of guilds) {
-    try {
-      await client.application.commands.set(commands, guildId);
-      log.info(`Registered ${commands.length} commands in ${guild.name}`);
-    } catch (err) {
-      log.warn(`Failed to register commands in ${guild.name}: ${err}`);
-    }
-  }
   log.info("Guild command registration complete");
+}
+
+/** Clear all global (non-guild) commands for this application. */
+async function clearGlobalCommands(appId: string): Promise<void> {
+  const url = `${API_BASE}/applications/${appId}/commands`;
+  try {
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${config.botToken}`,
+        "Content-Type": "application/json",
+      },
+      body: "[]",
+    });
+
+    if (res.ok) {
+      log.info("Cleared global commands");
+    } else if (res.status === 429) {
+      const body = await res.json() as { retry_after?: number };
+      log.warn(`Rate limited clearing globals — retrying after ${body.retry_after ?? 5}s`);
+      await sleep((body.retry_after ?? 5) * 1000);
+      await fetch(url, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bot ${config.botToken}`,
+          "Content-Type": "application/json",
+        },
+        body: "[]",
+      });
+    } else {
+      const text = await res.text();
+      log.warn(`Failed to clear global commands: HTTP ${res.status} — ${text}`);
+    }
+  } catch (err) {
+    log.warn(`Failed to clear global commands: ${errStr(err)}`);
+  }
+}
+
+/** PUT commands to a single guild, handling rate limits with one retry. */
+async function registerToGuild(appId: string, guildId: string): Promise<void> {
+  const url = `${API_BASE}/applications/${appId}/guilds/${guildId}/commands`;
+
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bot ${config.botToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(commands),
+  });
+
+  // Rate limited — wait and retry once
+  if (res.status === 429) {
+    const body = await res.json() as { retry_after?: number };
+    const retryAfter = body.retry_after ?? 5;
+    log.warn(`Rate limited (429) — retrying after ${retryAfter}s...`);
+    await sleep(retryAfter * 1000);
+
+    const retry = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${config.botToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(commands),
+    });
+
+    if (!retry.ok) {
+      const text = await retry.text();
+      throw new Error(`HTTP ${retry.status} on retry: ${text}`);
+    }
+    return;
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }

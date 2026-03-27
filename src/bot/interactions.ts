@@ -27,8 +27,17 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
   }
 
   try {
-    // Defer reply for all commands since they may take time
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    // Defer reply ASAP — Discord gives only 3 seconds from interaction creation.
+    // If deferReply fails (token expired due to network/gateway lag), log it but
+    // still attempt the command so the bot doesn't silently ignore user input.
+    let deferred = false;
+    try {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      deferred = true;
+    } catch (deferErr) {
+      log.warn(`deferReply failed for "${interaction.commandName}" (interaction may have expired): ${errStr(deferErr)}`);
+    }
+
     switch (interaction.commandName) {
       case "movie":
         await handleMovie(interaction);
@@ -64,7 +73,7 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         await handleStop(interaction);
         break;
       default:
-        await interaction.editReply("Unknown command.");
+        if (deferred) await interaction.editReply("Unknown command.");
     }
   } catch (err) {
     log.error(`Command "${interaction.commandName}" failed: ${errStr(err)}`);
@@ -73,7 +82,7 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         `An error occurred: ${err instanceof Error ? err.message : "Unknown error"}`
       );
     } catch {
-      // Interaction may have timed out
+      // Interaction may have timed out — editReply won't work
     }
   }
 }

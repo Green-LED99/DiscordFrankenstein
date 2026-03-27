@@ -1,5 +1,4 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-// sleep removed — teardownStream handles verified kill, no arbitrary delays needed
 import {
   isStreaming,
   isLiveStream,
@@ -7,8 +6,9 @@ import {
   getPausedState,
   clearPausedState,
   pauseStream,
-  stopVideoStream,
   startVideoStream,
+  restartAtPosition,
+  getCurrentElapsedSec,
   getSeriesInfo,
   isAutoplayEnabled,
   setAutoplay,
@@ -77,7 +77,7 @@ export async function handlePlay(
   );
 
   try {
-    // Adjust subtitles for seek offset if needed
+    // Adjust subtitles for the seek offset
     let subPath = paused.subtitlePath;
     if (subPath && paused.elapsedSec > 0) {
       try {
@@ -133,16 +133,16 @@ export async function handleSkip(
     return;
   }
 
-  // Get current elapsed time from whichever state is active
+  // Current position from whichever state is active
   const currentElapsed = playback?.elapsedSec ?? paused!.elapsedSec;
   const title = playback?.title ?? paused!.contentTitle;
   const newElapsed = Math.max(0, currentElapsed + skipSec);
   const timeStr = formatTime(newElapsed);
+  const direction = skipSec >= 0 ? "⏩" : "⏪";
 
-  // If paused, just update the saved timestamp
+  // If paused, just update the saved timestamp — no stream to restart
   if (!playback && paused) {
     paused.elapsedSec = newElapsed;
-    const direction = skipSec >= 0 ? "⏩" : "⏪";
     await interaction.editReply(
       `${direction} Skipped to ${timeStr} in **${title}** (paused). Use /play to resume.`
     );
@@ -150,46 +150,13 @@ export async function handleSkip(
     return;
   }
 
-  // If streaming, stop and restart at new position
-  const direction = skipSec >= 0 ? "⏩" : "⏪";
+  // Stream is active — atomically restart FFmpeg at the new position
   await interaction.editReply(
     `${direction} Skipping to ${timeStr} in **${title}**...`
   );
 
   try {
-    // Save current stream info before stopping
-    const info = getPlaybackInfo()!;
-    // Pause saves state, then we modify the elapsed time
-    await pauseStream({ preserveVoice: true });
-    const saved = getPausedState()!;
-    saved.elapsedSec = newElapsed;
-
-    // Adjust subtitles for new seek offset
-    let subPath = saved.subtitlePath;
-    if (subPath && newElapsed > 0) {
-      try {
-        subPath = await offsetSubtitleFile(subPath, newElapsed);
-      } catch {
-        log.warn("Failed to offset subtitles, continuing without");
-        subPath = saved.subtitlePath;
-      }
-    }
-
-    await startVideoStream(
-      saved.guildId,
-      saved.channelId,
-      saved.streamUrl,
-      saved.audioStreamIndex,
-      subPath,
-      saved.sourceInfo,
-      saved.headers,
-      false,
-      newElapsed,
-      saved.contentTitle,
-      saved.seriesInfo ?? undefined,
-    );
-
-    clearPausedState();
+    await restartAtPosition(newElapsed);
     await interaction.editReply(
       `${direction} Skipped to ${timeStr} in **${title}**`
     );
@@ -237,40 +204,11 @@ export async function handleSeek(
     return;
   }
 
-  // If streaming, stop and restart at target position
+  // Stream is active — atomically restart FFmpeg at the target position
   await interaction.editReply(`⏩ Seeking to ${timeStr} in **${title}**...`);
 
   try {
-    await pauseStream({ preserveVoice: true });
-    const saved = getPausedState()!;
-    saved.elapsedSec = targetSec;
-
-    // Adjust subtitles for seek offset
-    let subPath = saved.subtitlePath;
-    if (subPath && targetSec > 0) {
-      try {
-        subPath = await offsetSubtitleFile(subPath, targetSec);
-      } catch {
-        log.warn("Failed to offset subtitles, continuing without");
-        subPath = saved.subtitlePath;
-      }
-    }
-
-    await startVideoStream(
-      saved.guildId,
-      saved.channelId,
-      saved.streamUrl,
-      saved.audioStreamIndex,
-      subPath,
-      saved.sourceInfo,
-      saved.headers,
-      false,
-      targetSec,
-      saved.contentTitle,
-      saved.seriesInfo ?? undefined,
-    );
-
-    clearPausedState();
+    await restartAtPosition(targetSec);
     await interaction.editReply(`⏩ Seeked to ${timeStr} in **${title}**`);
     log.info(`Seeked "${title}" to ${timeStr}`);
   } catch (err) {
@@ -345,7 +283,6 @@ export async function handleAutoplay(
   if (newState) {
     const series = getSeriesInfo();
     if (series) {
-      // Register the autoplay callback
       registerAutoplayCallback(series);
       await interaction.editReply(
         `🔁 Autoplay **enabled** for **${series.showName}**. Next episodes will play automatically.`
@@ -382,7 +319,7 @@ async function playNextEpisode(
   const contentLabel = `${series.showName} ${episodeLabel} - ${nextEp.name}`;
   log.info(`Next episode: ${contentLabel}`);
 
-  // Fetch streams
+  // Fetch fresh streams for the new episode
   const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode);
   const topStreams = getTopStreams(streams);
 
@@ -394,65 +331,59 @@ async function playNextEpisode(
     return;
   }
 
-  // Auto-select first stream
   const selected = topStreams[0];
   log.info(`Auto-selected: ${selected.label}`);
 
-  // Stop current stream if running
-  if (isStreaming()) {
-    await stopVideoStream();
-  }
+  // Determine guild/channel — from interaction or last known
+  let targetGuildId: string | null = null;
+  let targetChannelId: string | null = null;
 
-  // Get guild/channel from current stream or paused state
-  const playback = getPlaybackInfo();
-  const paused = getPausedState();
-  const guildId = playback ? undefined : paused?.guildId;
-  const channelId = playback ? undefined : paused?.channelId;
-
-  // We need guild and channel — get from interaction if available
   if (interaction) {
     const member = interaction.member;
     if (!member || !("voice" in member)) {
       await interaction.editReply("Could not determine your voice channel.");
       return;
     }
-    const memberGuildId = interaction.guildId;
-    const memberChannelId = (member as { voice: { channelId: string | null } }).voice.channelId;
-    if (!memberGuildId || !memberChannelId) {
+    targetGuildId = interaction.guildId;
+    targetChannelId = (member as { voice: { channelId: string | null } }).voice.channelId;
+    if (!targetGuildId || !targetChannelId) {
       await interaction.editReply("You must be in a voice channel.");
       return;
     }
+    await interaction.editReply(`⏭️ Now playing: **${contentLabel}**`);
+  } else {
+    const lastChannel = getLastKnownVoiceChannel();
+    targetGuildId = lastChannel?.guildId ?? null;
+    targetChannelId = lastChannel?.channelId ?? null;
+  }
 
-    if (interaction) {
-      await interaction.editReply(`⏭️ Now playing: **${contentLabel}**`);
-    }
-
-    const newSeriesInfo: SeriesInfo = {
-      showId: series.showId,
-      showName: series.showName,
-      season: nextEp.season,
-      episode: nextEp.episode,
-    };
-
-    await startVideoStream(
-      memberGuildId,
-      memberChannelId,
-      selected.stream.url,
-      undefined, undefined, undefined, undefined,
-      false, undefined, contentLabel, newSeriesInfo
-    );
-
-    // Re-register autoplay callback for the new episode
-    if (isAutoplayEnabled()) {
-      registerAutoplayCallback(newSeriesInfo);
-    }
+  if (!targetGuildId || !targetChannelId) {
+    log.error("Next episode: no guild/channel available");
+    if (interaction) await interaction.editReply("Could not determine voice channel.");
     return;
   }
 
-  // Autoplay path (no interaction) — use last known guild/channel
-  log.info(`Autoplay: starting ${contentLabel}`);
-  // We need to get guild/channel from somewhere — use the series info context
-  // Since cleanup already happened, we'll rely on the autoplay having saved this
+  const newSeriesInfo: SeriesInfo = {
+    showId: series.showId,
+    showName: series.showName,
+    season: nextEp.season,
+    episode: nextEp.episode,
+  };
+
+  // startVideoStreamInner handles teardown of any existing stream internally —
+  // no need to call stopVideoStream() which would clear autoplay state
+  await startVideoStream(
+    targetGuildId,
+    targetChannelId,
+    selected.stream.url,
+    undefined, undefined, undefined, undefined,
+    false, undefined, contentLabel, newSeriesInfo
+  );
+
+  // Re-register autoplay callback for the new episode
+  if (isAutoplayEnabled()) {
+    registerAutoplayCallback(newSeriesInfo);
+  }
 }
 
 function registerAutoplayCallback(series: SeriesInfo): void {
@@ -497,7 +428,6 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
     episode: nextEp.episode,
   };
 
-  // Get guild/channel from stream.ts (set by every startVideoStreamInner)
   const lastChannel = getLastKnownVoiceChannel();
   const guildId = lastChannel?.guildId ?? null;
   const channelId = lastChannel?.channelId ?? null;
@@ -514,8 +444,5 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
     false, undefined, contentLabel, newSeriesInfo
   );
 
-  // Re-register for the next episode
   registerAutoplayCallback(newSeriesInfo);
 }
-
-// Channel tracking moved to stream.ts (getLastKnownVoiceChannel)
