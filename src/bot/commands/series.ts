@@ -1,4 +1,4 @@
-import type { ChatInputCommandInteraction, GuildMember } from "discord.js";
+import type { ChatInputCommandInteraction } from "discord.js";
 import { searchContent, resolveEpisode } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
@@ -6,7 +6,7 @@ import { probeStream } from "../../services/ffprobe.js";
 import { startVideoStream, isAutoplayEnabled } from "../../streamer/stream.js";
 import { pickStream } from "./picker.js";
 import { pickAudioTrack, pickSubtitleTrack } from "./options.js";
-// Channel tracking now handled automatically by stream.ts
+import { resolveVoiceChannel } from "./voice.js";
 import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("SeriesCmd");
@@ -17,25 +17,13 @@ export async function handleSeries(
   const title = interaction.options.getString("title", true);
   const seasonInput = interaction.options.getInteger("season") ?? undefined;
   const episodeInput = interaction.options.getInteger("episode") ?? undefined;
-  const member = interaction.member;
 
-  if (!member || !("voice" in member)) {
-    await interaction.editReply("Could not determine your voice channel.");
-    return;
-  }
-
-  if (!(member as GuildMember).voice.channelId) {
+  const voice = resolveVoiceChannel(interaction);
+  if (!voice) {
     await interaction.editReply("You must be in a voice channel to use this command.");
     return;
   }
-
-  const guildId = interaction.guildId;
-  if (!guildId) {
-    await interaction.editReply("This command can only be used in a server.");
-    return;
-  }
-
-  const channelId = (member as GuildMember).voice.channelId!;
+  const { guildId, channelId } = voice;
 
   // 1. Search Cinemeta
   await interaction.editReply(`Searching for "${title}"...`);

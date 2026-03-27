@@ -19,6 +19,7 @@ import {
 import { getNextEpisode } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { offsetSubtitleFile } from "../../services/opensubtitles.js";
+import { resolveVoiceChannel } from "./voice.js";
 import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("Playback");
@@ -339,17 +340,13 @@ async function playNextEpisode(
   let targetChannelId: string | null = null;
 
   if (interaction) {
-    const member = interaction.member;
-    if (!member || !("voice" in member)) {
-      await interaction.editReply("Could not determine your voice channel.");
-      return;
-    }
-    targetGuildId = interaction.guildId;
-    targetChannelId = (member as { voice: { channelId: string | null } }).voice.channelId;
-    if (!targetGuildId || !targetChannelId) {
+    const voice = resolveVoiceChannel(interaction);
+    if (!voice) {
       await interaction.editReply("You must be in a voice channel.");
       return;
     }
+    targetGuildId = voice.guildId;
+    targetChannelId = voice.channelId;
     await interaction.editReply(`⏭️ Now playing: **${contentLabel}**`);
   } else {
     const lastChannel = getLastKnownVoiceChannel();

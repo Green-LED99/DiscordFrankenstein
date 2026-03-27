@@ -1,4 +1,4 @@
-import type { ChatInputCommandInteraction, GuildMember } from "discord.js";
+import type { ChatInputCommandInteraction } from "discord.js";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -14,6 +14,7 @@ import {
 import type { SportsurgeEvent } from "../../services/sportsurge.js";
 import { probeStream } from "../../services/ffprobe.js";
 import { startVideoStream } from "../../streamer/stream.js";
+import { resolveVoiceChannel } from "./voice.js";
 import { createLogger, errStr } from "../../utils/logger.js";
 
 const log = createLogger("LiveCmd");
@@ -22,28 +23,13 @@ export async function handleLive(
   interaction: ChatInputCommandInteraction
 ): Promise<void> {
   const query = interaction.options.getString("team", true);
-  const member = interaction.member;
 
-  // Validate voice channel (same pattern as movie.ts)
-  if (!member || !("voice" in member)) {
-    await interaction.editReply("Could not determine your voice channel.");
+  const voice = resolveVoiceChannel(interaction);
+  if (!voice) {
+    await interaction.editReply("You must be in a voice channel to use this command.");
     return;
   }
-
-  if (!(member as GuildMember).voice.channelId) {
-    await interaction.editReply(
-      "You must be in a voice channel to use this command."
-    );
-    return;
-  }
-
-  const guildId = interaction.guildId;
-  if (!guildId) {
-    await interaction.editReply("This command can only be used in a server.");
-    return;
-  }
-
-  const channelId = (member as GuildMember).voice.channelId!;
+  const { guildId, channelId } = voice;
 
   // 1. Search for live events
   await interaction.editReply(`🔍 Searching for "${query}" games...`);
