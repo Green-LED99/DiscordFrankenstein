@@ -7,6 +7,7 @@ import { registerCommands, registerCommandsToNewGuild } from "./commands/registe
 const log = createLogger("Bot");
 
 let botClient: Client | null = null;
+let cachedAppId: string | null = null;
 
 export async function initBotClient(): Promise<void> {
   botClient = new Client({
@@ -20,6 +21,7 @@ export async function initBotClient(): Promise<void> {
   botClient.on("error", (err: Error) => log.error(`Discord client error: ${err.stack ?? err.message}`));
 
   botClient.once("ready", (client) => {
+    cachedAppId = client.application.id;
     log.info(`Bot logged in as ${client.user.tag}`);
     // Register commands in background — don't block the bot from handling interactions
     registerCommands(client)
@@ -28,8 +30,12 @@ export async function initBotClient(): Promise<void> {
   });
 
   botClient.on("guildCreate", (guild) => {
-    const appId = guild.client.application?.id;
-    if (!appId) return;
+    log.info(`Joined guild: ${guild.name} (${guild.id})`);
+    const appId = cachedAppId ?? guild.client.application?.id;
+    if (!appId) {
+      log.warn(`Cannot register commands in ${guild.name} — application ID not yet available`);
+      return;
+    }
     registerCommandsToNewGuild(appId, guild.id, guild.name).catch((err) =>
       log.error(`Failed to register commands in new guild ${guild.name}: ${errStr(err)}`),
     );

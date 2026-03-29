@@ -5,6 +5,9 @@ import { createLogger } from "../utils/logger.js";
 const execFileAsync = promisify(execFile);
 const log = createLogger("FFprobe");
 
+const DEFAULT_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+
 export interface AudioStreamInfo {
   index: number;       // global stream index (for -map 0:{index})
   codec: string;
@@ -70,12 +73,13 @@ export async function probeStream(
     "-probesize", "10000000",
   ];
 
-  // For HLS/authenticated streams, inject headers before the URL.
-  // User-Agent must use -user_agent (HLS demuxer only propagates this dedicated flag).
+  // Always send a User-Agent (many CDNs/resolvers block bare requests)
+  const ua = headers?.["User-Agent"] ?? DEFAULT_UA;
+  args.push("-user_agent", ua);
+
+  // For HLS/authenticated streams, inject additional headers before the URL.
   // -extension_picky 0 allows HLS segments with non-standard extensions (e.g., .txt).
   if (headers) {
-    const ua = headers["User-Agent"];
-    if (ua) args.push("-user_agent", ua);
     const otherHeaders = Object.entries(headers)
       .filter(([k]) => k !== "User-Agent")
       .map(([k, v]) => `${k}: ${v}\r\n`)
@@ -86,11 +90,18 @@ export async function probeStream(
 
   args.push(url); // URL must be LAST
 
-  const { stdout } = await execFileAsync(
-    "ffprobe",
-    args,
-    { timeout: 30_000 }
-  );
+  let stdout: string;
+  try {
+    const result = await execFileAsync("ffprobe", args, { timeout: 30_000 });
+    stdout = result.stdout;
+  } catch (err) {
+    // Include stderr in the error for better diagnostics
+    const stderr = (err as { stderr?: string }).stderr?.trim();
+    if (stderr) {
+      throw new Error(`ffprobe failed: ${stderr}`);
+    }
+    throw err;
+  }
 
   const data: FFprobeOutput = JSON.parse(stdout);
 
