@@ -182,7 +182,8 @@ index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..ddb742b29635858ceac3b4c33c68cb97
 @@ -118,6 +131,17 @@ export function prepareStream(input, options = {}, cancelSignal) {
      }
      else {
-         command.videoFilter(`scale=${width}:${height}`);
+-        command.videoFilter(`scale=${width}:${height}`);
++        command.videoFilter(`scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:-1:-1:color=black`);
 +        // Patched: inject subtitle burn filter after scale (combines via comma)
 +        if (mergedOptions.subtitlePath) {
 +            const escaped = mergedOptions.subtitlePath
@@ -405,8 +406,9 @@ index 3b8682afaaa7917d4d5f394d01af73a693761018..0b37d59602b5d32f57693ea574f5cb3b
          "-reconnect_at_eof 1",
 @@ -270,6 +279,18 @@ export function prepareStream(
    } else {
-     command.videoFilter(`scale=${width}:${height}`);
- 
+-    command.videoFilter(`scale=${width}:${height}`);
++    command.videoFilter(`scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:-1:-1:color=black`);
+
 +    // Patched: inject subtitle burn filter after scale (combines via comma)
 +    if ((mergedOptions as any).subtitlePath) {
 +      const escaped = ((mergedOptions as any).subtitlePath as string)
