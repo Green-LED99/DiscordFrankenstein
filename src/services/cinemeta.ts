@@ -81,6 +81,9 @@ export async function fetchMeta(
   const data = await cinemetaFetch<CinemetaMetaResponse>(
     `/meta/${type}/${imdbId}.json`,
   );
+  if (!data.meta?.id) {
+    throw new Error(`No ${type} found for IMDB ID ${imdbId}`);
+  }
   return {
     id: data.meta.id,
     name: data.meta.name,
