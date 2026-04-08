@@ -55,6 +55,24 @@ async function cinemetaFetch<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// --- Helpers ---
+
+/**
+ * Map a user-provided season number to Cinemeta's actual season value.
+ * Handles year-based numbering (e.g., 2003, 2004, ...) where user input "8"
+ * means the 8th season, not season number 8.
+ */
+function mapSeason(seasons: number[], userSeason: number): number | undefined {
+  // Direct match first (covers sequential numbering like 1, 2, 3)
+  if (seasons.includes(userSeason)) return userSeason;
+  // Ordinal fallback: treat userSeason as 1-based index into sorted seasons
+  // (covers year-based numbering like 2003, 2004, ...)
+  if (userSeason >= 1 && userSeason <= seasons.length) {
+    return seasons[userSeason - 1];
+  }
+  return undefined;
+}
+
 // --- Public API ---
 
 /**
@@ -106,22 +124,33 @@ export async function resolveEpisode(
   );
 
   if (season !== undefined && episode !== undefined) {
-    // Both specified — find exact match
+    // Both specified — resolve season (handles year-based numbering) and find exact match
+    const actualSeason = mapSeason(seasons, season);
+    if (actualSeason === undefined) {
+      throw new Error(`Season ${season} not found for ${imdbId}`);
+    }
+    if (actualSeason !== season) {
+      log.info(`Mapped season ${season} → ${actualSeason}`);
+    }
     const match = regularEpisodes.find(
-      (v) => v.season === season && v.episode === episode
+      (v) => v.season === actualSeason && v.episode === episode
     );
     if (!match) {
       throw new Error(`Episode S${season}E${episode} not found for ${imdbId}`);
     }
-    return { season, episode, name: match.name ?? "Unknown" };
+    return { season: actualSeason, episode, name: match.name ?? "Unknown" };
   }
 
   if (season !== undefined) {
-    // Season specified, pick random episode from that season
-    const seasonEps = regularEpisodes.filter((v) => v.season === season);
-    if (seasonEps.length === 0) {
+    // Season specified — resolve season and pick random episode
+    const actualSeason = mapSeason(seasons, season);
+    if (actualSeason === undefined) {
       throw new Error(`Season ${season} not found for ${imdbId}`);
     }
+    if (actualSeason !== season) {
+      log.info(`Mapped season ${season} → ${actualSeason}`);
+    }
+    const seasonEps = regularEpisodes.filter((v) => v.season === actualSeason);
     const pick = seasonEps[Math.floor(Math.random() * seasonEps.length)];
     log.info(`Random pick: S${pick.season}E${pick.episode} - ${pick.name}`);
     return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown" };
@@ -165,18 +194,26 @@ export async function getNextEpisode(
     };
   }
 
-  // Try first episode of next season
-  const nextSeasonEps = regularEpisodes
-    .filter((v) => v.season === currentSeason + 1)
-    .sort((a, b) => a.episode - b.episode);
-  if (nextSeasonEps.length > 0) {
-    const first = nextSeasonEps[0];
-    log.info(`Next episode (new season): S${first.season}E${first.episode} - ${first.name}`);
-    return {
-      season: first.season,
-      episode: first.episode,
-      name: first.name ?? "Unknown",
-    };
+  // Try first episode of next season (supports year-based and sequential numbering)
+  const seasons = [...new Set(regularEpisodes.map((v) => v.season))].sort(
+    (a, b) => a - b
+  );
+  const currentIdx = seasons.indexOf(currentSeason);
+  const nextSeason = currentIdx >= 0 ? seasons[currentIdx + 1] : undefined;
+
+  if (nextSeason !== undefined) {
+    const nextSeasonEps = regularEpisodes
+      .filter((v) => v.season === nextSeason)
+      .sort((a, b) => a.episode - b.episode);
+    if (nextSeasonEps.length > 0) {
+      const first = nextSeasonEps[0];
+      log.info(`Next episode (new season): S${first.season}E${first.episode} - ${first.name}`);
+      return {
+        season: first.season,
+        episode: first.episode,
+        name: first.name ?? "Unknown",
+      };
+    }
   }
 
   log.info(`No next episode after S${currentSeason}E${currentEpisode}`);
