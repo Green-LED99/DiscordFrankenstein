@@ -1,4 +1,12 @@
 import { createLogger } from "../utils/logger.js";
+import { config } from "../utils/config.js";
+import {
+  searchMovies as tmdbSearchMovies,
+  searchSeries as tmdbSearchSeries,
+  getMovieImdbId,
+  getSeriesImdbId,
+  findByImdbId,
+} from "./tmdb.js";
 
 const log = createLogger("Cinemeta");
 
@@ -151,6 +159,19 @@ export async function fetchMeta(
     `/meta/${type}/${imdbId}.json`,
   );
   if (!data.meta?.id) {
+    // TMDB fallback when Cinemeta has no data for this IMDB ID
+    if (config.tmdbApiKey) {
+      log.info(`Cinemeta has no data for ${imdbId}, trying TMDB fallback...`);
+      try {
+        const found = await findByImdbId(imdbId);
+        if (found) {
+          log.info(`TMDB fallback: ${found.name} (${found.year})`);
+          return { id: imdbId, name: found.name, type, year: found.year };
+        }
+      } catch (err) {
+        log.warn(`TMDB fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     throw new Error(`No ${type} found for IMDB ID ${imdbId}`);
   }
   return {
@@ -195,8 +216,40 @@ export async function searchContent(
   const data = await cinemetaFetch<CinemetaCatalogResponse>(
     `/catalog/${type}/top/search=${encoded}.json`
   );
-  log.info(`Found ${data.metas.length} ${type} results`);
-  return data.metas;
+
+  if (data.metas.length > 0) {
+    log.info(`Found ${data.metas.length} ${type} results`);
+    return data.metas;
+  }
+
+  // TMDB fallback when Cinemeta returns nothing
+  if (config.tmdbApiKey) {
+    log.info(`Cinemeta returned 0 results, trying TMDB fallback...`);
+    try {
+      const tmdbResults =
+        type === "movie"
+          ? await tmdbSearchMovies(query)
+          : await tmdbSearchSeries(query);
+
+      if (tmdbResults.length > 0) {
+        const top = tmdbResults[0];
+        const imdbId =
+          type === "movie"
+            ? await getMovieImdbId(top.id)
+            : await getSeriesImdbId(top.id);
+
+        if (imdbId) {
+          log.info(`TMDB fallback: ${top.name} (${top.year}) → ${imdbId}`);
+          return [{ id: imdbId, name: top.name, type, year: top.year }];
+        }
+      }
+    } catch (err) {
+      log.warn(`TMDB fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  log.info(`Found 0 ${type} results`);
+  return [];
 }
 
 /**

@@ -44,6 +44,9 @@ export const config = {
   userToken: requireEnv("USER_TOKEN"),
   stremioAddonUrl: requireEnv("STREMIO_ADDON_URL"),
 
+  // Optional: TMDB fallback when Cinemeta has no results
+  tmdbApiKey: optionalEnv("TMDB_API_KEY", ""),
+
   // Streaming settings with validation
   maxResolution: parseIntEnv("MAX_RESOLUTION", 720),
   maxFps: parseIntEnv("MAX_FPS", 30),
