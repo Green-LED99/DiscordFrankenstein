@@ -321,7 +321,7 @@ async function playNextEpisode(
   log.info(`Next episode: ${contentLabel}`);
 
   // Fetch fresh streams for the new episode
-  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode);
+  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode, nextEp.unmappedSeason);
   const topStreams = getTopStreams(streams);
 
   if (topStreams.length === 0) {
@@ -365,6 +365,7 @@ async function playNextEpisode(
     showName: series.showName,
     season: nextEp.season,
     episode: nextEp.episode,
+    unmappedSeason: nextEp.unmappedSeason,
   };
 
   // startVideoStreamInner handles teardown of any existing stream internally —
@@ -406,7 +407,7 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
   const contentLabel = `${series.showName} ${episodeLabel} - ${nextEp.name}`;
   log.info(`Autoplay: fetching streams for ${contentLabel}`);
 
-  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode);
+  const streams = await fetchStreams("series", series.showId, nextEp.season, nextEp.episode, nextEp.unmappedSeason);
   const topStreams = getTopStreams(streams);
 
   if (topStreams.length === 0) {
@@ -423,6 +424,7 @@ async function playNextEpisodeAutoplay(series: SeriesInfo): Promise<void> {
     showName: series.showName,
     season: nextEp.season,
     episode: nextEp.episode,
+    unmappedSeason: nextEp.unmappedSeason,
   };
 
   const lastChannel = getLastKnownVoiceChannel();

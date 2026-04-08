@@ -129,6 +129,7 @@ export async function handleLink(
       show.id,
       episode.season,
       episode.episode,
+      episode.unmappedSeason,
     );
     const topStreams = getTopStreams(streams);
 

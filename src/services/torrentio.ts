@@ -77,7 +77,8 @@ export async function fetchStreams(
   type: "movie" | "series",
   imdbId: string,
   season?: number,
-  episode?: number
+  episode?: number,
+  retrySeason?: number,
 ): Promise<TorrentioStream[]> {
   let path: string;
   if (type === "movie") {
@@ -96,6 +97,22 @@ export async function fetchStreams(
 
   const data = (await res.json()) as TorrentioResponse;
   log.info(`Found ${data.streams.length} streams`);
+
+  // Retry with alternate season number (handles Cinemeta year-based → IMDB sequential mismatch)
+  if (data.streams.length === 0 && type === "series" && retrySeason !== undefined && retrySeason !== season) {
+    const retryPath = `/stream/series/${imdbId}:${retrySeason}:${episode}.json`;
+    log.info(`0 streams with season ${season}, retrying with season ${retrySeason}: ${retryPath}`);
+
+    const retryRes = await fetch(`${config.stremioAddonUrl}${retryPath}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (retryRes.ok) {
+      const retryData = (await retryRes.json()) as TorrentioResponse;
+      log.info(`Retry found ${retryData.streams.length} streams`);
+      return retryData.streams;
+    }
+  }
+
   return data.streams;
 }
 

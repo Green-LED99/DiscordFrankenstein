@@ -86,6 +86,7 @@ export interface SeriesInfo {
   showName: string;
   season: number;
   episode: number;
+  unmappedSeason?: number;
 }
 
 interface ActiveStream {

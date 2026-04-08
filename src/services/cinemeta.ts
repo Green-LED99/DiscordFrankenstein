@@ -49,9 +49,10 @@ interface CinemetaCatalogResponse {
 }
 
 export interface EpisodeInfo {
-  season: number;
+  season: number; // Cinemeta's actual value (may be year-based, e.g., 2010)
   episode: number;
   name: string;
+  unmappedSeason?: number; // Ordinal season (e.g., 8) for Torrentio retry when Cinemeta uses year-based numbering
 }
 
 // --- API helpers ---
@@ -201,6 +202,12 @@ function mapSeason(seasons: number[], userSeason: number): number | undefined {
   return undefined;
 }
 
+/** Inverse of mapSeason: given a Cinemeta season value, return its 1-based ordinal position. */
+function reverseMapSeason(seasons: number[], cinemetaSeason: number): number {
+  const idx = seasons.indexOf(cinemetaSeason);
+  return idx >= 0 ? idx + 1 : cinemetaSeason;
+}
+
 // --- Public API ---
 
 /**
@@ -298,7 +305,8 @@ export async function resolveEpisode(
     if (!match) {
       throw new Error(`Episode S${season}E${episode} not found for ${imdbId}`);
     }
-    return { season: actualSeason, episode, name: match.name ?? "Unknown" };
+    const unmapped = actualSeason !== season ? season : undefined;
+    return { season: actualSeason, episode, name: match.name ?? "Unknown", unmappedSeason: unmapped };
   }
 
   if (season !== undefined) {
@@ -313,7 +321,8 @@ export async function resolveEpisode(
     const seasonEps = regularEpisodes.filter((v) => v.season === actualSeason);
     const pick = seasonEps[Math.floor(Math.random() * seasonEps.length)];
     log.info(`Random pick: S${pick.season}E${pick.episode} - ${pick.name}`);
-    return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown" };
+    const unmapped = actualSeason !== season ? season : undefined;
+    return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown", unmappedSeason: unmapped };
   }
 
   // Neither specified — pick random season and episode
@@ -321,7 +330,8 @@ export async function resolveEpisode(
   const seasonEps = regularEpisodes.filter((v) => v.season === randomSeason);
   const pick = seasonEps[Math.floor(Math.random() * seasonEps.length)];
   log.info(`Random pick: S${pick.season}E${pick.episode} - ${pick.name}`);
-  return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown" };
+  const ordinal = reverseMapSeason(seasons, randomSeason);
+  return { season: pick.season, episode: pick.episode, name: pick.name ?? "Unknown", unmappedSeason: ordinal !== randomSeason ? ordinal : undefined };
 }
 
 /**
@@ -345,19 +355,23 @@ export async function getNextEpisode(
   const nextInSeason = regularEpisodes.find(
     (v) => v.season === currentSeason && v.episode === currentEpisode + 1
   );
+  // Build seasons array for ordinal mapping
+  const seasons = [...new Set(regularEpisodes.map((v) => v.season))].sort(
+    (a, b) => a - b
+  );
+
   if (nextInSeason) {
     log.info(`Next episode: S${nextInSeason.season}E${nextInSeason.episode} - ${nextInSeason.name}`);
+    const ordinal = reverseMapSeason(seasons, nextInSeason.season);
     return {
       season: nextInSeason.season,
       episode: nextInSeason.episode,
       name: nextInSeason.name ?? "Unknown",
+      unmappedSeason: ordinal !== nextInSeason.season ? ordinal : undefined,
     };
   }
 
   // Try first episode of next season (supports year-based and sequential numbering)
-  const seasons = [...new Set(regularEpisodes.map((v) => v.season))].sort(
-    (a, b) => a - b
-  );
   const currentIdx = seasons.indexOf(currentSeason);
   const nextSeason = currentIdx >= 0 ? seasons[currentIdx + 1] : undefined;
 
@@ -368,10 +382,12 @@ export async function getNextEpisode(
     if (nextSeasonEps.length > 0) {
       const first = nextSeasonEps[0];
       log.info(`Next episode (new season): S${first.season}E${first.episode} - ${first.name}`);
+      const ordinal = reverseMapSeason(seasons, first.season);
       return {
         season: first.season,
         episode: first.episode,
         name: first.name ?? "Unknown",
+        unmappedSeason: ordinal !== first.season ? ordinal : undefined,
       };
     }
   }

@@ -64,7 +64,7 @@ export async function handleSeries(
   await interaction.editReply(
     `Fetching streams for **${show.name}** ${episodeLabel}...`
   );
-  const streams = await fetchStreams("series", show.id, episode.season, episode.episode);
+  const streams = await fetchStreams("series", show.id, episode.season, episode.episode, episode.unmappedSeason);
   const topStreams = getTopStreams(streams);
 
   if (topStreams.length === 0) {
@@ -118,6 +118,7 @@ export async function handleSeries(
       showName: show.name,
       season: episode.season,
       episode: episode.episode,
+      unmappedSeason: episode.unmappedSeason,
     });
     await interaction.editReply({
       content: `Now streaming: **${show.name}** ${episodeLabel} - ${episode.name}`,
