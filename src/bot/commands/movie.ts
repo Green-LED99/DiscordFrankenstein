@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-import { searchContent } from "../../services/cinemeta.js";
+import { searchContent, parseImdbInput, fetchMeta } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
@@ -23,16 +23,26 @@ export async function handleMovie(
   }
   const { guildId, channelId } = voice;
 
-  // 1. Search Cinemeta
-  await interaction.editReply(`Searching for "${title}"...`);
-  const results = await searchContent(title, "movie");
-  if (results.length === 0) {
-    await interaction.editReply(`No movies found for "${title}".`);
-    return;
+  // 1. Resolve movie — by IMDB ID/URL or text search
+  const parsed = parseImdbInput(title);
+  let movie: { id: string; name: string; year: string };
+
+  if (parsed.type === "imdb") {
+    await interaction.editReply(`Looking up IMDB ID \`${parsed.imdbId}\`...`);
+    const meta = await fetchMeta(parsed.imdbId, "movie");
+    movie = { id: meta.id, name: meta.name, year: meta.releaseInfo ?? meta.year ?? "Unknown" };
+  } else {
+    await interaction.editReply(`Searching for "${title}"...`);
+    const results = await searchContent(parsed.query, "movie");
+    if (results.length === 0) {
+      await interaction.editReply(`No movies found for "${title}".`);
+      return;
+    }
+    const r = results[0];
+    movie = { id: r.id, name: r.name, year: r.releaseInfo ?? r.year ?? "Unknown" };
   }
 
-  const movie = results[0];
-  const year = movie.releaseInfo ?? movie.year ?? "Unknown";
+  const year = movie.year;
   log.info(`Found: ${movie.name} (${year}) [IMDB: ${movie.id}]`);
 
   // 2. Fetch streams from Torrentio

@@ -3,6 +3,7 @@ import { handleMovie } from "./commands/movie.js";
 import { handleSeries } from "./commands/series.js";
 import { handleStop } from "./commands/stop.js";
 import { handleLive } from "./commands/live.js";
+import { handleLink } from "./commands/link.js";
 import {
   handlePause,
   handlePlay,
@@ -47,6 +48,9 @@ export async function handleInteraction(interaction: Interaction): Promise<void>
         break;
       case "live":
         await handleLive(interaction);
+        break;
+      case "link":
+        await handleLink(interaction);
         break;
       case "pause":
         await handlePause(interaction);

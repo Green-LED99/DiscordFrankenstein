@@ -20,7 +20,7 @@ export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
     options: [
       {
         name: "title",
-        description: 'Movie name (e.g., "F1", "Fight Club")',
+        description: 'Movie name or IMDB URL (e.g., "Fight Club", "tt0137523")',
         type: ApplicationCommandOptionType.String,
         required: true,
       },
@@ -32,7 +32,7 @@ export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
     options: [
       {
         name: "title",
-        description: 'Series name (e.g., "Family Guy")',
+        description: 'Series name or IMDB URL (e.g., "Family Guy", "tt0182576")',
         type: ApplicationCommandOptionType.String,
         required: true,
       },
@@ -46,6 +46,42 @@ export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
       {
         name: "episode",
         description: "Episode number (random if not specified)",
+        type: ApplicationCommandOptionType.Integer,
+        required: false,
+        min_value: 1,
+      },
+    ],
+  },
+  {
+    name: "link",
+    description: "Get a stream URL without joining voice",
+    options: [
+      {
+        name: "title",
+        description: 'Movie/series name or IMDB URL (e.g., "Fight Club", "tt0137523")',
+        type: ApplicationCommandOptionType.String,
+        required: true,
+      },
+      {
+        name: "type",
+        description: "Content type",
+        type: ApplicationCommandOptionType.String,
+        required: true,
+        choices: [
+          { name: "Movie", value: "movie" },
+          { name: "Series", value: "series" },
+        ],
+      },
+      {
+        name: "season",
+        description: "Season number (for series, random if not specified)",
+        type: ApplicationCommandOptionType.Integer,
+        required: false,
+        min_value: 1,
+      },
+      {
+        name: "episode",
+        description: "Episode number (for series, random if not specified)",
         type: ApplicationCommandOptionType.Integer,
         required: false,
         min_value: 1,

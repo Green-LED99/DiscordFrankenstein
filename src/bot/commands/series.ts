@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-import { searchContent, resolveEpisode } from "../../services/cinemeta.js";
+import { searchContent, resolveEpisode, parseImdbInput, fetchMeta } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
@@ -25,15 +25,24 @@ export async function handleSeries(
   }
   const { guildId, channelId } = voice;
 
-  // 1. Search Cinemeta
-  await interaction.editReply(`Searching for "${title}"...`);
-  const results = await searchContent(title, "series");
-  if (results.length === 0) {
-    await interaction.editReply(`No TV series found for "${title}".`);
-    return;
+  // 1. Resolve series — by IMDB ID/URL or text search
+  const parsed = parseImdbInput(title);
+  let show: { id: string; name: string };
+
+  if (parsed.type === "imdb") {
+    await interaction.editReply(`Looking up IMDB ID \`${parsed.imdbId}\`...`);
+    const meta = await fetchMeta(parsed.imdbId, "series");
+    show = { id: meta.id, name: meta.name };
+  } else {
+    await interaction.editReply(`Searching for "${title}"...`);
+    const results = await searchContent(parsed.query, "series");
+    if (results.length === 0) {
+      await interaction.editReply(`No TV series found for "${title}".`);
+      return;
+    }
+    show = results[0];
   }
 
-  const show = results[0];
   log.info(`Found: ${show.name} [IMDB: ${show.id}]`);
 
   // 2. Resolve episode

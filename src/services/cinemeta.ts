@@ -30,6 +30,8 @@ interface CinemetaMetaResponse {
     imdb_id: string;
     type: string;
     name: string;
+    year?: string;
+    releaseInfo?: string;
     videos?: CinemetaVideo[];
   };
 }
@@ -53,6 +55,39 @@ async function cinemetaFetch<T>(path: string): Promise<T> {
     throw new Error(`Cinemeta error: ${res.status} ${res.statusText} for ${path}`);
   }
   return res.json() as Promise<T>;
+}
+
+// --- IMDB input parsing ---
+
+const IMDB_REGEX = /(?:imdb\.com\/title\/)?(tt\d{7,8})\b/;
+
+export type ImdbInput =
+  | { type: "imdb"; imdbId: string }
+  | { type: "search"; query: string };
+
+/** Detect whether input is an IMDB URL/ID or a plain search query. */
+export function parseImdbInput(input: string): ImdbInput {
+  const match = input.match(IMDB_REGEX);
+  if (match) return { type: "imdb", imdbId: match[1] };
+  return { type: "search", query: input };
+}
+
+/** Fetch metadata for a known IMDB ID directly (no search needed). */
+export async function fetchMeta(
+  imdbId: string,
+  type: "movie" | "series",
+): Promise<CinemetaResult> {
+  log.info(`Fetching ${type} meta for ${imdbId}`);
+  const data = await cinemetaFetch<CinemetaMetaResponse>(
+    `/meta/${type}/${imdbId}.json`,
+  );
+  return {
+    id: data.meta.id,
+    name: data.meta.name,
+    type,
+    year: data.meta.year,
+    releaseInfo: data.meta.releaseInfo,
+  };
 }
 
 // --- Helpers ---
