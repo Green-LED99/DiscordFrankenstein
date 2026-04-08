@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-import { searchContent, parseImdbInput, fetchMeta } from "../../services/cinemeta.js";
+import { searchContent, parseImdbInput, fetchMeta, resolveImdbId } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
@@ -29,6 +29,15 @@ export async function handleMovie(
 
   if (parsed.type === "imdb") {
     await interaction.editReply(`Looking up IMDB ID \`${parsed.imdbId}\`...`);
+    const resolved = await resolveImdbId(parsed.imdbId);
+    if (resolved.type === "episode") {
+      await interaction.editReply(`That IMDB ID is a TV episode. Use \`/series ${parsed.imdbId}\` instead.`);
+      return;
+    }
+    if (resolved.type === "series") {
+      await interaction.editReply(`That IMDB ID is a TV series. Use \`/series ${parsed.imdbId}\` instead.`);
+      return;
+    }
     const meta = await fetchMeta(parsed.imdbId, "movie");
     movie = { id: meta.id, name: meta.name, year: meta.releaseInfo ?? meta.year ?? "Unknown" };
   } else {

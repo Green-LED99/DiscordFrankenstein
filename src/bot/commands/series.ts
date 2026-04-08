@@ -1,5 +1,5 @@
 import type { ChatInputCommandInteraction } from "discord.js";
-import { searchContent, resolveEpisode, parseImdbInput, fetchMeta } from "../../services/cinemeta.js";
+import { searchContent, resolveEpisode, parseImdbInput, fetchMeta, resolveImdbId } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
@@ -15,8 +15,8 @@ export async function handleSeries(
   interaction: ChatInputCommandInteraction
 ): Promise<void> {
   const title = interaction.options.getString("title", true);
-  const seasonInput = interaction.options.getInteger("season") ?? undefined;
-  const episodeInput = interaction.options.getInteger("episode") ?? undefined;
+  let seasonInput = interaction.options.getInteger("season") ?? undefined;
+  let episodeInput = interaction.options.getInteger("episode") ?? undefined;
 
   const voice = resolveVoiceChannel(interaction);
   if (!voice) {
@@ -31,8 +31,17 @@ export async function handleSeries(
 
   if (parsed.type === "imdb") {
     await interaction.editReply(`Looking up IMDB ID \`${parsed.imdbId}\`...`);
-    const meta = await fetchMeta(parsed.imdbId, "series");
-    show = { id: meta.id, name: meta.name };
+    const resolved = await resolveImdbId(parsed.imdbId);
+    if (resolved.type === "episode") {
+      // Episode URL provided — use parent series ID and override season/episode
+      seasonInput = resolved.season;
+      episodeInput = resolved.episode;
+      const meta = await fetchMeta(resolved.imdbId, "series");
+      show = { id: meta.id, name: meta.name };
+    } else {
+      const meta = await fetchMeta(parsed.imdbId, "series");
+      show = { id: meta.id, name: meta.name };
+    }
   } else {
     await interaction.editReply(`Searching for "${title}"...`);
     const results = await searchContent(parsed.query, "series");

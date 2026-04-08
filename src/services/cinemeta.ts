@@ -72,6 +72,75 @@ export function parseImdbInput(input: string): ImdbInput {
   return { type: "search", query: input };
 }
 
+// --- IMDB GraphQL resolution ---
+
+const IMDB_GRAPHQL = "https://caching.graphql.imdb.com/";
+
+export interface ResolvedImdbId {
+  type: "movie" | "series" | "episode";
+  imdbId: string; // For episodes: the PARENT series ID. Otherwise: the ID itself.
+  season?: number; // Only for episodes
+  episode?: number; // Only for episodes
+}
+
+/**
+ * Query IMDB's public GraphQL API to determine if an ID is a movie, series,
+ * or episode. For episodes, resolves the parent series ID and season/episode.
+ */
+export async function resolveImdbId(imdbId: string): Promise<ResolvedImdbId> {
+  log.info(`Resolving IMDB ID type: ${imdbId}`);
+
+  const query = `query { title(id: "${imdbId}") { titleType { id } series { series { id } episodeNumber { episodeNumber seasonNumber } } } }`;
+
+  const res = await fetch(IMDB_GRAPHQL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0",
+    },
+    body: JSON.stringify({ query }),
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`IMDB GraphQL error: ${res.status} ${res.statusText}`);
+  }
+
+  const json = (await res.json()) as {
+    data?: {
+      title?: {
+        titleType?: { id?: string };
+        series?: {
+          series?: { id?: string };
+          episodeNumber?: { seasonNumber?: number; episodeNumber?: number };
+        } | null;
+      } | null;
+    };
+  };
+
+  const title = json.data?.title;
+  if (!title) {
+    throw new Error(`IMDB ID ${imdbId} not found`);
+  }
+
+  const titleType = title.titleType?.id ?? "";
+  const seriesData = title.series;
+
+  if (titleType === "tvEpisode" && seriesData?.series?.id) {
+    const parentId = seriesData.series.id;
+    const season = seriesData.episodeNumber?.seasonNumber;
+    const episode = seriesData.episodeNumber?.episodeNumber;
+    log.info(`Resolved ${imdbId} as episode → parent: ${parentId}, S${season}E${episode}`);
+    return { type: "episode", imdbId: parentId, season, episode };
+  }
+
+  if (titleType === "tvSeries" || titleType === "tvMiniSeries") {
+    return { type: "series", imdbId };
+  }
+
+  return { type: "movie", imdbId };
+}
+
 /** Fetch metadata for a known IMDB ID directly (no search needed). */
 export async function fetchMeta(
   imdbId: string,

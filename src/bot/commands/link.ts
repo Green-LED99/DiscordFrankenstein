@@ -4,6 +4,7 @@ import {
   resolveEpisode,
   parseImdbInput,
   fetchMeta,
+  resolveImdbId,
 } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
 import { pickStream } from "./picker.js";
@@ -18,8 +19,8 @@ export async function handleLink(
   const type = interaction.options.getString("type", true) as
     | "movie"
     | "series";
-  const seasonInput = interaction.options.getInteger("season") ?? undefined;
-  const episodeInput = interaction.options.getInteger("episode") ?? undefined;
+  let seasonInput = interaction.options.getInteger("season") ?? undefined;
+  let episodeInput = interaction.options.getInteger("episode") ?? undefined;
 
   const parsed = parseImdbInput(title);
 
@@ -31,6 +32,13 @@ export async function handleLink(
       await interaction.editReply(
         `Looking up IMDB ID \`${parsed.imdbId}\`...`,
       );
+      const resolved = await resolveImdbId(parsed.imdbId);
+      if (resolved.type === "episode" || resolved.type === "series") {
+        await interaction.editReply(
+          `That IMDB ID is a TV ${resolved.type}. Use \`/link type:series\` instead.`,
+        );
+        return;
+      }
       const meta = await fetchMeta(parsed.imdbId, "movie");
       movie = {
         id: meta.id,
@@ -83,8 +91,16 @@ export async function handleLink(
       await interaction.editReply(
         `Looking up IMDB ID \`${parsed.imdbId}\`...`,
       );
-      const meta = await fetchMeta(parsed.imdbId, "series");
-      show = { id: meta.id, name: meta.name };
+      const resolved = await resolveImdbId(parsed.imdbId);
+      if (resolved.type === "episode") {
+        seasonInput = resolved.season;
+        episodeInput = resolved.episode;
+        const meta = await fetchMeta(resolved.imdbId, "series");
+        show = { id: meta.id, name: meta.name };
+      } else {
+        const meta = await fetchMeta(parsed.imdbId, "series");
+        show = { id: meta.id, name: meta.name };
+      }
     } else {
       await interaction.editReply(`Searching for "${title}"...`);
       const results = await searchContent(parsed.query, "series");
