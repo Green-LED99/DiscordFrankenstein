@@ -89,10 +89,11 @@ export async function fetchStreamEmbedId(
 /**
  * Resolve a stream embed ID to a direct HLS playlist URL.
  *
- * The embed page uses a Clappr player with a base64-encoded source URL:
- *   source: window.atob('base64...')
+ * The embed page uses a Plyr + HLS.js player with a plaintext source URL:
+ *   const source = "https://<host>/playlist/<id>/load-playlist";
+ *   hls.loadSource(source);
  *
- * Returns the decoded playlist URL and the HTTP headers required for playback.
+ * Returns the playlist URL and the HTTP headers required for playback.
  */
 export async function resolveStreamUrl(
   streamId: string
@@ -103,14 +104,14 @@ export async function resolveStreamUrl(
     Referer: `${BASE_URL}/`,
   });
 
-  const match = html.match(/window\.atob\('([^']+)'\)/);
-  if (!match?.[1]) {
+  const match = html.match(/https?:\/\/[^\s'"]+\/playlist\/\d+\/load-playlist/);
+  if (!match?.[0]) {
     throw new Error(
-      `No base64-encoded stream source found in embed page for stream ${streamId}`
+      `No playlist URL found in embed page for stream ${streamId}`
     );
   }
 
-  const streamUrl = Buffer.from(match[1], "base64").toString("utf8");
+  const streamUrl = match[0];
 
   log.info(`Resolved stream URL: ${streamUrl.slice(0, 80)}...`);
 
