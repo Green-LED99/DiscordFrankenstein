@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { getStreamer } from "./client.js";
 import { autoTune, buildStreamOptions } from "./encoder.js";
 import { probeStream, type StreamInfo } from "../services/ffprobe.js";
+import { offsetSubtitleFile } from "../services/opensubtitles.js";
 import { startSyncMonitor, stopSyncMonitor } from "../utils/sync.js";
 import { createLogger, errStr } from "../utils/logger.js";
 
@@ -197,7 +198,7 @@ interface TeardownResult {
  * Tear down the current stream with VERIFIED FFmpeg kill.
  * @param leaveVoice - true for /stop, /pause, autoplay end. false for /seek, /skip (preserves Go Live).
  */
-async function teardownStream(leaveVoice: boolean): Promise<TeardownResult> {
+async function teardownStream(leaveVoice: boolean, preserveSubtitles = false): Promise<TeardownResult> {
   const result: TeardownResult = {
     seriesInfo: activeStream?.seriesInfo ?? null,
     wasAutoplay: autoplayEnabled,
@@ -246,7 +247,7 @@ async function teardownStream(leaveVoice: boolean): Promise<TeardownResult> {
 
   // 8. Clean up subtitle temp file (only if not paused)
   const subPath = activeStream.subtitlePath;
-  if (subPath && !pausedState) {
+  if (subPath && !pausedState && !preserveSubtitles) {
     rm(dirname(subPath), { recursive: true, force: true }).catch(() => {});
   }
 
@@ -370,7 +371,8 @@ export async function restartAtPosition(seekSec: number): Promise<void> {
     log.info(`restartAtPosition: "${contentTitle}" → ${seekSec.toFixed(1)}s`);
 
     // Teardown current stream — must leave voice (library can't reuse Go Live)
-    await teardownStream(true);
+    // Preserve subtitle temp file so the restarted FFmpeg can re-use it
+    await teardownStream(true, !!subtitlePath);
 
     // Wait for OS to fully reap the old FFmpeg process
     await new Promise(r => setTimeout(r, 1000));
@@ -382,10 +384,22 @@ export async function restartAtPosition(seekSec: number): Promise<void> {
       await killAllFfmpegAndVerify();
     }
 
+    // Offset subtitle timestamps to match the new seek position
+    // (-ss as input option resets PTS to 0, so SRT needs shifting)
+    let offsetSubPath = subtitlePath;
+    if (subtitlePath && seekSec > 0) {
+      try {
+        offsetSubPath = await offsetSubtitleFile(subtitlePath, seekSec);
+      } catch (err) {
+        log.warn(`Failed to offset subtitles for seek: ${errStr(err)}`);
+        offsetSubPath = undefined;
+      }
+    }
+
     // Relaunch at the new position (inline, no second lock acquisition)
     await startVideoStreamInner(
       guildId, channelId, streamUrl, audioStreamIndex,
-      subtitlePath, sourceInfo, headers, false,
+      offsetSubPath, sourceInfo, headers, false,
       seekSec, contentTitle, seriesInfo,
     );
 
