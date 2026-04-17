@@ -42,8 +42,8 @@ export function resolveVoiceChannel(
         return { guildId, channelId: voiceState.channelId };
       }
     }
-  } catch {
-    // Selfbot not initialized — can't resolve
+  } catch (err) {
+    log.debug(`Selfbot voice fallback unavailable: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   return null;

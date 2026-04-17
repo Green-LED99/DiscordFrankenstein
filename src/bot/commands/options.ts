@@ -5,8 +5,12 @@ import {
   ComponentType,
   type ChatInputCommandInteraction,
 } from "discord.js";
-import type { AudioStreamInfo } from "../../services/ffprobe.js";
+import type { AudioStreamInfo, SubtitleStreamInfo } from "../../services/ffprobe.js";
 import type { SubtitleEntry } from "../../services/opensubtitles.js";
+
+export type SubtitleSelection =
+  | { type: "embedded"; stream: SubtitleStreamInfo }
+  | { type: "external"; entry: SubtitleEntry };
 import { createLogger } from "../../utils/logger.js";
 
 const log = createLogger("Options");
@@ -69,10 +73,8 @@ export async function pickAudioTrack(
 
     const selected = audioStreams[index];
     await click.deferUpdate();
-    // Return the audio-relative index (position in audio streams array),
-    // NOT the global stream index. The library uses -map 0:a:{N}? which
-    // is audio-relative (0 = first audio, 1 = second audio).
     log.info(`Audio track selected: ${langName(selected.language)} (audio index ${index})`);
+    await interaction.editReply({ content: `Audio: **${langName(selected.language)}**`, components: [] });
     return index;
   } catch {
     // Timeout — use default (first audio)
@@ -81,35 +83,64 @@ export async function pickAudioTrack(
 }
 
 /**
- * Show subtitle picker from available OpenSubtitles entries.
- * Returns the selected SubtitleEntry, or null for no subtitles.
+ * Show subtitle picker with embedded streams (from the file) and external
+ * subtitles (from OpenSubtitles). Embedded subs are shown first and clearly
+ * labelled so users can tell them apart.
+ *
+ * Returns a SubtitleSelection indicating which type was chosen, or null for none.
  */
 export async function pickSubtitleTrack(
   interaction: ChatInputCommandInteraction,
-  subtitles: SubtitleEntry[]
-): Promise<SubtitleEntry | null> {
-  if (subtitles.length === 0) return null;
+  externalSubs: SubtitleEntry[],
+  embeddedSubs?: SubtitleStreamInfo[],
+): Promise<SubtitleSelection | null> {
+  // Only show text-based embedded subs (PGS/VobSub can't be burned via subtitles filter)
+  const textEmbedded = (embeddedSubs ?? []).filter((s) => s.isTextBased);
 
-  // Show top languages + "None" button
-  const topSubs = subtitles.slice(0, 4); // Max 4 + None = 5 buttons
+  if (textEmbedded.length === 0 && externalSubs.length === 0) return null;
+
+  // Build combined option list: embedded first, then external, max 4 + "None" = 5 buttons
+  type Option = { id: string; label: string; style: ButtonStyle; selection: SubtitleSelection };
+  const options: Option[] = [];
+
+  for (const stream of textEmbedded) {
+    if (options.length >= 4) break;
+    const lang = langName(stream.language);
+    options.push({
+      id: `sub_emb_${options.length}`,
+      label: `[FILE] ${lang}`,
+      style: stream.language === "eng" ? ButtonStyle.Success : ButtonStyle.Primary,
+      selection: { type: "embedded", stream },
+    });
+  }
+
+  for (const entry of externalSubs) {
+    if (options.length >= 4) break;
+    options.push({
+      id: `sub_ext_${options.length}`,
+      label: langName(entry.lang),
+      style: entry.lang === "eng" ? ButtonStyle.Primary : ButtonStyle.Secondary,
+      selection: { type: "external", entry },
+    });
+  }
 
   const buttons = [
     new ButtonBuilder()
       .setCustomId("sub_none")
       .setLabel("No Subtitles")
       .setStyle(ButtonStyle.Secondary),
-    ...topSubs.map((sub, i) =>
+    ...options.map((opt) =>
       new ButtonBuilder()
-        .setCustomId(`sub_${i}`)
-        .setLabel(langName(sub.lang))
-        .setStyle(sub.lang === "eng" ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        .setCustomId(opt.id)
+        .setLabel(opt.label)
+        .setStyle(opt.style)
     ),
   ];
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(buttons);
 
   await interaction.editReply({
-    content: "📝 **Select subtitles:**",
+    content: "**Select subtitles:**",
     components: [row],
   });
 
@@ -125,15 +156,16 @@ export async function pickSubtitleTrack(
 
     if (click.customId === "sub_none") {
       log.info("No subtitles selected");
+      await interaction.editReply({ content: "Subtitles: **None**", components: [] });
       return null;
     }
 
-    const index = parseInt(click.customId.split("_")[1], 10);
-    if (Number.isNaN(index) || index < 0 || index >= topSubs.length) return null;
+    const opt = options.find((o) => o.id === click.customId);
+    if (!opt) return null;
 
-    const selected = topSubs[index];
-    log.info(`Subtitle selected: ${langName(selected.lang)}`);
-    return selected;
+    log.info(`Subtitle selected: ${opt.label} (${opt.selection.type})`);
+    await interaction.editReply({ content: `Subtitles: **${opt.label}**`, components: [] });
+    return opt.selection;
   } catch {
     // Timeout — no subtitles
     return null;

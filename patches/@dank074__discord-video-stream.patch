@@ -193,7 +193,7 @@ index d00994c2e1c7141caacd9c9798ec5daba6bf7ed9..ddb742b29635858ceac3b4c33c68cb97
 +                .replace(/\[/g, "\\\\[")
 +                .replace(/\]/g, "\\\\]")
 +                .replace(/;/g, "\\\\;");
-+            command.videoFilter(`subtitles=${escaped}:force_style='Fontsize=24'`);
++            command.videoFilter(`subtitles=${escaped}:original_size=${width}x${height}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1,Shadow=0,MarginV=15,Bold=1'`);
 +        }
          if (frameRate)
              command.fpsOutput(frameRate);
@@ -418,7 +418,7 @@ index 3b8682afaaa7917d4d5f394d01af73a693761018..0b37d59602b5d32f57693ea574f5cb3b
 +        .replace(/\[/g, "\\\\[")
 +        .replace(/\]/g, "\\\\]")
 +        .replace(/;/g, "\\\\;");
-+      command.videoFilter(`subtitles=${escaped}:force_style='Fontsize=24'`);
++      command.videoFilter(`subtitles=${escaped}:original_size=${width}x${height}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=1,Shadow=0,MarginV=15,Bold=1'`);
 +    }
 +
      if (frameRate) command.fpsOutput(frameRate);

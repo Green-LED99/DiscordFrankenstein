@@ -1,7 +1,11 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { writeFile, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { createLogger } from "../utils/logger.js";
+
+const execFileAsync = promisify(execFile);
 
 const log = createLogger("OpenSubs");
 
@@ -88,8 +92,56 @@ export async function downloadSubtitle(subtitle: SubtitleEntry): Promise<string>
   const tempDir = await mkdtemp(join(tmpdir(), "df-subs-"));
   const filePath = join(tempDir, `subtitle_${subtitle.lang}.srt`);
 
-  await writeFile(filePath, content, "utf-8");
+  await writeFile(filePath, stripSubtitleTags(content), "utf-8");
   log.info(`Subtitle saved to: ${filePath}`);
+  return filePath;
+}
+
+/**
+ * Strip ASS override tags (`{\\fs72}`, `{\\an8}`, etc.) and HTML formatting
+ * (`<font size="72">`, `<b>`, etc.) from subtitle text. Without this,
+ * inline overrides defeat FFmpeg's `force_style` parameter — inline ASS
+ * tags always take priority over style definitions.
+ */
+function stripSubtitleTags(content: string): string {
+  return content
+    .replace(/\{[^}]*\}/g, "")    // ASS override blocks: {\fs72}, {\an8\pos(320,50)}, etc.
+    .replace(/<[^>]*>/g, "");      // HTML tags: <font size="72">, <b>, </font>, etc.
+}
+
+/**
+ * Extract an embedded subtitle track from a stream URL to a local SRT file.
+ * Uses ffmpeg to extract text-based subtitle streams (subrip, ass, webvtt, etc.)
+ * and convert to plain text SRT. Strips all inline formatting tags so that
+ * FFmpeg's force_style can control font size during burn-in.
+ */
+export async function extractEmbeddedSubtitle(
+  streamUrl: string,
+  subtitleIndex: number,
+  language: string,
+): Promise<string> {
+  log.info(`Extracting embedded subtitle (stream ${subtitleIndex}, ${language})...`);
+
+  const tempDir = await mkdtemp(join(tmpdir(), "df-subs-"));
+  const filePath = join(tempDir, `embedded_${language}.srt`);
+
+  await execFileAsync("ffmpeg", [
+    "-i", streamUrl,
+    "-map", `0:${subtitleIndex}`,
+    "-c:s", "text",
+    "-y",
+    filePath,
+  ], { timeout: 30_000 });
+
+  // Strip any remaining inline formatting tags (ASS overrides, HTML font tags)
+  const raw = await readFile(filePath, "utf-8");
+  const cleaned = stripSubtitleTags(raw);
+  if (cleaned !== raw) {
+    await writeFile(filePath, cleaned, "utf-8");
+    log.info("Stripped inline formatting tags from extracted subtitle");
+  }
+
+  log.info(`Embedded subtitle extracted to: ${filePath}`);
   return filePath;
 }
 

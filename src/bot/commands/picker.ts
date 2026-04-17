@@ -58,6 +58,7 @@ export async function pickStream(
     const selected = streams[index];
 
     await click.deferUpdate();
+    await interaction.editReply({ content: `Selected: **${selected.label}**`, components: [] });
 
     log.info(`User picked stream ${index + 1}: ${selected.label}`);
     return selected;

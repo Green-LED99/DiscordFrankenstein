@@ -99,7 +99,7 @@ export interface ResolvedImdbId {
 export async function resolveImdbId(imdbId: string): Promise<ResolvedImdbId> {
   log.info(`Resolving IMDB ID type: ${imdbId}`);
 
-  const query = `query { title(id: "${imdbId}") { titleType { id } series { series { id } episodeNumber { episodeNumber seasonNumber } } } }`;
+  const query = `query($id: ID!) { title(id: $id) { titleType { id } series { series { id } episodeNumber { episodeNumber seasonNumber } } } }`;
 
   const res = await fetch(IMDB_GRAPHQL, {
     method: "POST",
@@ -107,7 +107,7 @@ export async function resolveImdbId(imdbId: string): Promise<ResolvedImdbId> {
       "Content-Type": "application/json",
       "User-Agent": "Mozilla/5.0",
     },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, variables: { id: imdbId } }),
     signal: AbortSignal.timeout(10_000),
   });
 
@@ -139,6 +139,10 @@ export async function resolveImdbId(imdbId: string): Promise<ResolvedImdbId> {
     const parentId = seriesData.series.id;
     const season = seriesData.episodeNumber?.seasonNumber;
     const episode = seriesData.episodeNumber?.episodeNumber;
+    if (season === undefined || episode === undefined) {
+      log.warn(`Episode ${imdbId} has no season/episode number — treating as movie`);
+      return { type: "movie", imdbId };
+    }
     log.info(`Resolved ${imdbId} as episode → parent: ${parentId}, S${season}E${episode}`);
     return { type: "episode", imdbId: parentId, season, episode };
   }

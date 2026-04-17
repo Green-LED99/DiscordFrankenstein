@@ -80,6 +80,10 @@ export async function fetchStreams(
   episode?: number,
   retrySeason?: number,
 ): Promise<TorrentioStream[]> {
+  if (type === "series" && (season === undefined || episode === undefined)) {
+    throw new Error("Season and episode are required for series streams");
+  }
+
   let path: string;
   if (type === "movie") {
     path = `/stream/movie/${imdbId}.json`;
@@ -110,6 +114,8 @@ export async function fetchStreams(
       const retryData = (await retryRes.json()) as TorrentioResponse;
       log.info(`Retry found ${retryData.streams.length} streams`);
       return retryData.streams;
+    } else {
+      log.warn(`Retry with season ${retrySeason} also failed: HTTP ${retryRes.status}`);
     }
   }
 

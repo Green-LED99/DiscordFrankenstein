@@ -1,7 +1,7 @@
 import type { ChatInputCommandInteraction } from "discord.js";
 import { searchContent, parseImdbInput, fetchMeta, resolveImdbId } from "../../services/cinemeta.js";
 import { fetchStreams, getTopStreams } from "../../services/torrentio.js";
-import { fetchSubtitles, downloadSubtitle } from "../../services/opensubtitles.js";
+import { fetchSubtitles, downloadSubtitle, extractEmbeddedSubtitle } from "../../services/opensubtitles.js";
 import { probeStream } from "../../services/ffprobe.js";
 import { startVideoStream } from "../../streamer/stream.js";
 import { pickStream } from "./picker.js";
@@ -90,11 +90,13 @@ export async function handleMovie(
     const audioIdx = await pickAudioTrack(interaction, sourceInfo.audioStreams);
     if (audioIdx !== null) audioStreamIndex = audioIdx;
 
-    // 6. Subtitle selection from OpenSubtitles
-    const subtitles = await fetchSubtitles("movie", movie.id);
-    const selectedSub = await pickSubtitleTrack(interaction, subtitles);
-    if (selectedSub) {
-      subtitlePath = await downloadSubtitle(selectedSub);
+    // 6. Subtitle selection — embedded (from file) first, external (OpenSubtitles) as fallback
+    const externalSubs = await fetchSubtitles("movie", movie.id);
+    const selectedSub = await pickSubtitleTrack(interaction, externalSubs, sourceInfo.subtitleStreams);
+    if (selectedSub?.type === "embedded") {
+      subtitlePath = await extractEmbeddedSubtitle(selected.stream.url, selectedSub.stream.index, selectedSub.stream.language);
+    } else if (selectedSub?.type === "external") {
+      subtitlePath = await downloadSubtitle(selectedSub.entry);
     }
   } catch (err) {
     log.warn(`Audio/subtitle selection failed, continuing without: ${errStr(err)}`);

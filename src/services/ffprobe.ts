@@ -16,6 +16,14 @@ export interface AudioStreamInfo {
   title?: string;      // e.g., "Stereo", "5.1 Surround"
 }
 
+export interface SubtitleStreamInfo {
+  index: number;       // global stream index
+  codec: string;       // "subrip", "ass", "hdmv_pgs_subtitle", etc.
+  language: string;    // ISO 639 code or "und"
+  title?: string;
+  isTextBased: boolean; // true for subrip/ass/webvtt/mov_text; false for PGS/VobSub
+}
+
 export interface StreamInfo {
   videoCodec: string;
   audioCodec: string;
@@ -26,6 +34,7 @@ export interface StreamInfo {
   hasBFrames: boolean;
   isVFR: boolean;
   audioStreams: AudioStreamInfo[];
+  subtitleStreams: SubtitleStreamInfo[];
 }
 
 interface FFprobeStream {
@@ -65,7 +74,7 @@ export async function probeStream(
   log.info("Probing stream metadata...");
 
   const args = [
-    "-v", "quiet",
+    "-v", "error",
     "-print_format", "json",
     "-show_streams",
     "-show_format",
@@ -103,7 +112,12 @@ export async function probeStream(
     throw err;
   }
 
-  const data: FFprobeOutput = JSON.parse(stdout);
+  let data: FFprobeOutput;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    throw new Error(`ffprobe returned invalid JSON (${stdout.length} bytes)`);
+  }
 
   const videoStream = data.streams.find((s) => s.codec_type === "video");
   if (!videoStream) {
@@ -119,6 +133,18 @@ export async function probeStream(
       language: s.tags?.language ?? "und",
       channels: s.channels ?? 2,
       title: s.tags?.title,
+    }));
+
+  // Collect all subtitle streams with metadata
+  const TEXT_SUB_CODECS = new Set(["subrip", "ass", "ssa", "webvtt", "mov_text"]);
+  const subtitleStreams: SubtitleStreamInfo[] = data.streams
+    .filter((s) => s.codec_type === "subtitle")
+    .map((s) => ({
+      index: s.index ?? 0,
+      codec: s.codec_name ?? "unknown",
+      language: s.tags?.language ?? "und",
+      title: s.tags?.title,
+      isTextBased: TEXT_SUB_CODECS.has(s.codec_name ?? ""),
     }));
 
   const firstAudio = audioStreams[0];
@@ -150,15 +176,19 @@ export async function probeStream(
     hasBFrames,
     isVFR,
     audioStreams,
+    subtitleStreams,
   };
 
   const audioSummary = audioStreams.length > 1
     ? `${audioStreams.length} audio tracks [${audioStreams.map((a) => a.language).join(", ")}]`
     : `audio: ${info.audioCodec}`;
+  const subSummary = subtitleStreams.length > 0
+    ? `, ${subtitleStreams.length} subtitle tracks [${subtitleStreams.filter((s) => s.isTextBased).length} text]`
+    : "";
 
   log.info(
     `Probe result: ${info.videoCodec} ${info.width}x${info.height}@${info.fps}fps, ` +
-      `${audioSummary}, bframes: ${info.hasBFrames}, vfr: ${info.isVFR}`
+      `${audioSummary}${subSummary}, bframes: ${info.hasBFrames}, vfr: ${info.isVFR}`
   );
   return info;
 }
